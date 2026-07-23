@@ -44,16 +44,27 @@ class BeatGrid:
 _TIME_SIGNATURE_RE = re.compile(r"\s*(\d+)\s*/\s*(\d+)\s*")
 
 
+def _finite(value: object, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
 def beats_per_bar(value: str | None) -> int:
     if not value:
         return 4
-    match = _TIME_SIGNATURE_RE.fullmatch(value)
+    match = _TIME_SIGNATURE_RE.fullmatch(str(value))
     if not match:
         return 4
     return max(1, min(12, int(match.group(1))))
 
 
 def _normalise_bpm(value: float) -> list[float]:
+    value = _finite(value, 0.0)
+    if value <= 0.0:
+        return []
     return [
         round(value * multiplier, 4)
         for multiplier in (0.5, 1.0, 2.0)
@@ -64,11 +75,11 @@ def _normalise_bpm(value: float) -> list[float]:
 def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[float]:
     values: list[float] = []
     if rhythm.selectedBpm:
-        values.extend(_normalise_bpm(float(rhythm.selectedBpm)))
+        values.extend(_normalise_bpm(rhythm.selectedBpm))
     for candidate in rhythm.bpmCandidates:
-        values.extend(_normalise_bpm(float(candidate.bpm)))
+        values.extend(_normalise_bpm(candidate.bpm))
     if dsp and dsp.bpm:
-        values.extend(_normalise_bpm(float(dsp.bpm)))
+        values.extend(_normalise_bpm(dsp.bpm))
     return sorted(set(values or [120.0]))
 
 
@@ -119,12 +130,45 @@ def _offset_candidates(
     dsp: DspSummary | None,
 ) -> list[float]:
     bar_duration = (60.0 / bpm) * beats
-    values = [max(0.0, min(bar_duration, float(rhythm.downbeatOffsetSeconds)))]
+    model_offset = _finite(rhythm.downbeatOffsetSeconds, 0.0)
+    values = [max(0.0, min(bar_duration, model_offset))]
     if dsp and dsp.beatTimes:
         values.extend(float(value) % bar_duration for value in dsp.beatTimes[:24])
     steps = max(8, beats * 8)
     values.extend((bar_duration * index) / steps for index in range(steps))
     return sorted(set(round(value, 5) for value in values))
+
+
+def _tempo_segments(
+    rhythm: RhythmDraft,
+    duration: float,
+    selected_bpm: float,
+) -> tuple[TempoSegment, ...]:
+    output: list[TempoSegment] = []
+    for item in rhythm.tempoSegments:
+        start = max(0.0, min(duration, _finite(item.startSeconds, -1.0)))
+        end = max(0.0, min(duration, _finite(item.endSeconds, -1.0)))
+        bpm = _finite(item.bpm, 0.0)
+        confidence = max(0.0, min(1.0, _finite(item.confidence, 0.5)))
+        if start < duration and end > start and 20.0 <= bpm <= 320.0:
+            output.append(
+                TempoSegment(
+                    startSeconds=round(start, 3),
+                    endSeconds=round(end, 3),
+                    bpm=round(bpm, 3),
+                    confidence=confidence,
+                )
+            )
+    if not output:
+        output.append(
+            TempoSegment(
+                startSeconds=0.0,
+                endSeconds=max(0.001, duration),
+                bpm=selected_bpm,
+                confidence=max(0.0, min(1.0, _finite(rhythm.confidence, 0.5))),
+            )
+        )
+    return tuple(sorted(output, key=lambda item: item.startSeconds))
 
 
 def build_beat_grid(
@@ -136,10 +180,16 @@ def build_beat_grid(
     profile: AccuracyProfile | None = None,
 ) -> BeatGrid:
     profile = profile or load_accuracy_profile()
-    signature = rhythm.timeSignature or "4/4"
+    duration = max(0.001, _finite(duration, 0.001))
+    signature = (
+        str(rhythm.timeSignature)
+        if _TIME_SIGNATURE_RE.fullmatch(str(rhythm.timeSignature or ""))
+        else "4/4"
+    )
     beats = beats_per_bar(signature)
     observed = list(dsp.beatTimes) if dsp else []
     best: tuple[float, float, float] | None = None
+    selected_model_bpm = _finite(rhythm.selectedBpm, 0.0) if rhythm.selectedBpm else 0.0
 
     for bpm in _candidate_bpms(rhythm, dsp):
         integer_error = _integer_bar_error(bpm, beats, sections)
@@ -147,8 +197,8 @@ def build_beat_grid(
             beat_error = _beat_alignment_error(bpm, offset, observed)
             section_error = _section_alignment_error(bpm, beats, offset, sections)
             model_prior = 0.0
-            if rhythm.selectedBpm:
-                ratio = max(bpm, rhythm.selectedBpm) / min(bpm, rhythm.selectedBpm)
+            if selected_model_bpm > 0:
+                ratio = max(bpm, selected_model_bpm) / min(bpm, selected_model_bpm)
                 model_prior = (
                     min(1.0, abs(math.log2(ratio)))
                     * profile.grid_model_prior_weight
@@ -183,17 +233,6 @@ def build_beat_grid(
             bar_starts.append(round(current_bar, 6))
         current_bar += bar_duration
 
-    tempo_segments = tuple(rhythm.tempoSegments)
-    if not tempo_segments:
-        tempo_segments = (
-            TempoSegment(
-                startSeconds=0.0,
-                endSeconds=max(0.001, duration),
-                bpm=bpm,
-                confidence=rhythm.confidence,
-            ),
-        )
-
     return BeatGrid(
         bpm=round(bpm, 4),
         time_signature=signature,
@@ -204,5 +243,5 @@ def build_beat_grid(
         beat_times=tuple(beat_times),
         bar_starts=tuple(bar_starts),
         score=round(score, 6),
-        tempo_segments=tempo_segments,
+        tempo_segments=_tempo_segments(rhythm, duration, bpm),
     )
