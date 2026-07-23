@@ -13,55 +13,129 @@ from .schemas import (
     ResolutionDraft,
     SectionResult,
     SectionStructureDraft,
+    SpecialistChordDraft,
+    SpecialistSectionDraft,
 )
 
 
 NOTE_PC = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5, "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11}
 MAJOR_ROMAN = ("I", "bII", "II", "bIII", "III", "IV", "#IV", "V", "bVI", "VI", "bVII", "VII")
 MINOR_ROMAN = ("i", "bII", "ii", "III", "#III", "iv", "#iv", "v", "VI", "#VI", "VII", "#VII")
+ALLOWED_SECTION_TYPES = {
+    "intro",
+    "verse",
+    "pre_chorus",
+    "chorus",
+    "post_chorus",
+    "bridge",
+    "interlude",
+    "solo",
+    "breakdown",
+    "outro",
+    "other",
+}
+SECTION_TYPE_ALIASES = {
+    "aメロ": "verse",
+    "bメロ": "pre_chorus",
+    "サビ": "chorus",
+    "ラスサビ": "chorus",
+    "イントロ": "intro",
+    "間奏": "interlude",
+    "ブリッジ": "bridge",
+    "ソロ": "solo",
+    "アウトロ": "outro",
+    "ending": "outro",
+    "prechorus": "pre_chorus",
+    "pre-chorus": "pre_chorus",
+    "postchorus": "post_chorus",
+    "post-chorus": "post_chorus",
+}
+
+
+def _finite(value: object, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _confidence(value: object, default: float = 0.5) -> float:
+    return max(0.0, min(1.0, _finite(value, default)))
+
+
+def normalise_section_type(value: str | None) -> str:
+    token = (value or "other").strip().lower().replace(" ", "_")
+    if token in ALLOWED_SECTION_TYPES:
+        return token
+    for alias, resolved in SECTION_TYPE_ALIASES.items():
+        if alias in token:
+            return resolved
+    if "verse" in token:
+        return "verse"
+    if "chorus" in token or "hook" in token:
+        return "chorus"
+    if "intro" in token:
+        return "intro"
+    if "outro" in token:
+        return "outro"
+    return "other"
 
 
 def normalise_sections(
     raw_sections: list[SectionStructureDraft],
     *,
     duration: float,
-    max_sections: int = 8,
+    max_sections: int = 12,
 ) -> list[SectionStructureDraft]:
-    ordered = sorted(raw_sections, key=lambda item: (item.startSeconds, item.endSeconds, item.id))
-    cleaned: list[SectionStructureDraft] = []
-    for index, item in enumerate(ordered):
-        start = max(0.0, min(duration, float(item.startSeconds)))
-        end = max(start + 0.25, min(duration, float(item.endSeconds)))
-        if start >= duration or end <= start:
+    duration = max(0.001, _finite(duration, 0.001))
+    candidates: list[SectionStructureDraft] = []
+    for index, item in enumerate(raw_sections):
+        start = _finite(item.startSeconds, -1.0)
+        end = _finite(item.endSeconds, -1.0)
+        if start < 0.0 or end <= start or start >= duration:
             continue
-        if cleaned and start < cleaned[-1].endSeconds:
-            midpoint = max(cleaned[-1].startSeconds + 0.25, (cleaned[-1].endSeconds + start) / 2.0)
-            previous = cleaned[-1]
-            cleaned[-1] = previous.model_copy(update={"endSeconds": min(midpoint, end - 0.25)})
-            start = cleaned[-1].endSeconds
-        section_id = item.id.strip() or f"section-{index + 1}"
-        cleaned.append(
+        start = max(0.0, min(duration, start))
+        end = max(start + 0.25, min(duration, end))
+        if end <= start:
+            continue
+        section_id = (item.id or "").strip() or f"section-{index + 1}"
+        name = (item.name or "").strip() or f"セクション{index + 1}"
+        candidates.append(
             item.model_copy(
                 update={
                     "id": section_id,
+                    "name": name,
+                    "type": normalise_section_type(item.type),
                     "startSeconds": round(start, 3),
                     "endSeconds": round(end, 3),
+                    "confidence": _confidence(item.confidence),
+                    "notes": (item.notes or "").strip(),
                 }
             )
         )
 
-    if not cleaned:
-        return [
-            SectionStructureDraft(
-                id="full-track",
-                name="全体",
-                type="other",
-                startSeconds=0.0,
-                endSeconds=max(0.001, duration),
-                confidence=0.2,
-                notes="構造境界を確定できなかったため全体区間として扱います。",
+    ordered = sorted(candidates, key=lambda item: (item.startSeconds, item.endSeconds, item.id))
+    cleaned: list[SectionStructureDraft] = []
+    for item in ordered:
+        start = item.startSeconds
+        end = item.endSeconds
+        if cleaned and start < cleaned[-1].endSeconds:
+            midpoint = max(
+                cleaned[-1].startSeconds + 0.25,
+                (cleaned[-1].endSeconds + start) / 2.0,
             )
-        ]
+            previous = cleaned[-1]
+            previous_end = min(midpoint, end - 0.25)
+            if previous_end > previous.startSeconds:
+                cleaned[-1] = previous.model_copy(update={"endSeconds": round(previous_end, 3)})
+            start = cleaned[-1].endSeconds
+        if end - start < 0.25:
+            continue
+        cleaned.append(item.model_copy(update={"startSeconds": round(start, 3), "endSeconds": round(end, 3)}))
+
+    if not cleaned:
+        return []
 
     first = cleaned[0]
     if first.startSeconds > 0.25:
@@ -98,8 +172,10 @@ def normalise_sections(
         merge_index = min(
             range(len(cleaned) - 1),
             key=lambda index: (
-                cleaned[index].endSeconds - cleaned[index].startSeconds
-                + cleaned[index + 1].endSeconds - cleaned[index + 1].startSeconds,
+                cleaned[index].endSeconds
+                - cleaned[index].startSeconds
+                + cleaned[index + 1].endSeconds
+                - cleaned[index + 1].startSeconds,
                 index,
             ),
         )
@@ -129,28 +205,86 @@ def normalise_sections(
     return output
 
 
-def apply_resolution(
-    chords: list[ChordEvent],
-    resolution: ResolutionDraft,
-) -> None:
+def normalise_specialist_result(
+    result: SpecialistSectionDraft,
+    *,
+    section: SectionStructureDraft,
+    role: str,
+    clip_start: float,
+    clip_end: float,
+    beat_duration: float,
+) -> SpecialistSectionDraft:
+    clip_duration = max(0.1, clip_end - clip_start)
+    raw_times = [
+        _finite(value, -1.0)
+        for chord in result.chords
+        for value in (chord.startSeconds, chord.endSeconds)
+    ]
+    valid_times = [value for value in raw_times if value >= 0.0]
+    relative = bool(valid_times) and max(valid_times) <= clip_duration + 1.0 and section.startSeconds > 1.0
+    offset = clip_start if relative else 0.0
+
+    chords: list[SpecialistChordDraft] = []
+    for item in result.chords:
+        start = _finite(item.startSeconds, -1.0) + offset
+        end = _finite(item.endSeconds, -1.0) + offset
+        if start < 0.0:
+            continue
+        start = max(section.startSeconds, min(section.endSeconds, start))
+        if end <= start:
+            end = start + max(0.12, beat_duration)
+        end = min(section.endSeconds, end)
+        if end - start < 0.05:
+            continue
+        symbol = canonicalize_symbol(item.symbol)
+        alternatives = [
+            canonicalize_symbol(value)
+            for value in item.alternatives
+            if canonicalize_symbol(value) != symbol
+        ]
+        chords.append(
+            item.model_copy(
+                update={
+                    "symbol": symbol,
+                    "startSeconds": round(start, 3),
+                    "endSeconds": round(end, 3),
+                    "confidence": _confidence(item.confidence),
+                    "alternatives": list(dict.fromkeys(alternatives))[:5],
+                }
+            )
+        )
+
+    return result.model_copy(
+        update={
+            "sectionId": section.id,
+            "role": role,
+            "key": result.key or section.key,
+            "mode": result.mode or section.mode,
+            "chords": chords,
+        }
+    )
+
+
+def apply_resolution(chords: list[ChordEvent], resolution: ResolutionDraft) -> None:
     for choice in resolution.choices:
+        start = _finite(choice.startSeconds, -1.0)
+        end = _finite(choice.endSeconds, -1.0)
+        if start < 0.0 or end <= start:
+            continue
         symbol = canonicalize_symbol(choice.chosenSymbol)
         if symbol == "X":
             continue
+        confidence = _confidence(choice.confidence)
         for chord in chords:
-            overlap = max(
-                0.0,
-                min(chord.endSeconds, choice.endSeconds)
-                - max(chord.startSeconds, choice.startSeconds),
-            )
+            overlap = max(0.0, min(chord.endSeconds, end) - max(chord.startSeconds, start))
             if overlap <= 0:
                 continue
             if symbol not in chord.alternatives and symbol != chord.symbol:
                 continue
             old = chord.symbol
             chord.symbol = symbol
-            chord.confidence = max(chord.confidence, choice.confidence)
-            chord.agreement = max(chord.agreement or 0.0, choice.confidence)
+            chord.confidence = max(chord.confidence, confidence)
+            chord.agreement = max(chord.agreement or 0.0, confidence)
             chord.alternatives = list(
                 dict.fromkeys([old] + [value for value in chord.alternatives if value != symbol])
             )[:3]
@@ -260,15 +394,15 @@ def build_section_result(
     return SectionResult(
         id=section.id,
         name=section.name,
-        type=section.type,
+        type=normalise_section_type(section.type),
         startSeconds=section.startSeconds,
         endSeconds=section.endSeconds,
         key=section.key,
         mode=section.mode,
-        confidence=section.confidence,
+        confidence=_confidence(section.confidence),
         summary=summary or section.notes,
         measures=measures,
-        agreement=agreement,
+        agreement=_confidence(agreement, 0.0),
     )
 
 
@@ -298,4 +432,42 @@ def validate_invariants(result: AnalysisResult) -> list[str]:
                     errors.append(f"invalid_beat:{section.id}:{chord.beat}")
                 if not math.isfinite(chord.startSeconds) or not math.isfinite(chord.endSeconds):
                     errors.append(f"non_finite_time:{section.id}")
+    return sorted(set(errors))
+
+
+def validate_quality(result: AnalysisResult) -> list[str]:
+    errors: list[str] = []
+    duration = result.track.durationSeconds
+    chords = [
+        chord
+        for section in result.sections
+        for measure in section.measures
+        for chord in measure.chords
+    ]
+    known = [chord for chord in chords if canonicalize_symbol(chord.symbol) not in {"X", "N"}]
+    known_coverage = sum(chord.endSeconds - chord.startSeconds for chord in known)
+    unresolved_coverage = sum(
+        item.endSeconds - item.startSeconds
+        for item in result.uncertainRanges
+        if not item.resolved
+    )
+
+    if duration >= 90.0 and len(result.sections) < 3:
+        errors.append(f"too_few_sections:{len(result.sections)}")
+    minimum_chords = max(4, math.ceil(duration / 20.0))
+    if len(chords) < minimum_chords:
+        errors.append(f"too_few_chords:{len(chords)}<{minimum_chords}")
+    if not known:
+        errors.append("no_known_chords")
+    if duration > 0 and known_coverage / duration < 0.45:
+        errors.append(f"insufficient_known_chord_coverage:{known_coverage / duration:.3f}")
+    if duration > 0 and unresolved_coverage / duration > 0.30:
+        errors.append(f"excessive_unresolved_coverage:{unresolved_coverage / duration:.3f}")
+    if any(
+        section.id == "full-track"
+        or "フォールバック" in section.summary
+        or "fallback" in section.summary.lower()
+        for section in result.sections
+    ):
+        errors.append("structure_fallback_present")
     return sorted(set(errors))
