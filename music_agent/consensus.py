@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from statistics import mean
 
+from .accuracy_profile import AccuracyProfile, load_accuracy_profile
 from .beat_grid import BeatGrid
 from .chord_symbol import canonicalize_symbol, parse_chord
 from .schemas import (
@@ -17,19 +18,13 @@ from .schemas import (
 from .sequence_optimizer import optimize_sequence
 
 
-ROLE_WEIGHTS = {
-    "root_quality": 1.25,
-    "bass_extension": 0.92,
-    "rhythm_pattern": 0.82,
-}
-
-
 @dataclass(slots=True)
 class ConsensusOutput:
     chords: list[ChordEvent]
     agreement: float
     uncertain_ranges: list[UncertainRange]
     slot_alternatives: list[list[str]]
+    slot_scores: list[dict[str, float]]
 
 
 def _overlap(start: float, end: float, other_start: float, other_end: float) -> float:
@@ -70,15 +65,15 @@ def _symbol_vote(
     votes: dict[str, float],
     symbol: str,
     weight: float,
+    *,
+    simple_triad_reinforcement: float,
 ) -> None:
     canonical = canonicalize_symbol(symbol)
     votes[canonical] += max(0.001, weight)
     parsed = parse_chord(canonical)
     if parsed.root and parsed.quality not in {"unknown", "no_chord"}:
-        # Root/quality evidence reinforces simple triad candidates without
-        # erasing a separately supported seventh or inversion.
         simple = canonicalize_symbol(canonical, simplify=True)
-        votes[simple] += max(0.001, weight * 0.22)
+        votes[simple] += max(0.001, weight * simple_triad_reinforcement)
 
 
 def consensus_section(
@@ -87,8 +82,9 @@ def consensus_section(
     specialists: list[SpecialistSectionDraft],
     grid: BeatGrid,
     dsp_runs: list[DspChordRun] | None = None,
-    uncertainty_threshold: float = 0.58,
+    profile: AccuracyProfile | None = None,
 ) -> ConsensusOutput:
+    profile = profile or load_accuracy_profile()
     boundaries = grid.slot_boundaries(section.startSeconds, section.endSeconds)
     if len(boundaries) < 2:
         boundaries = [section.startSeconds, section.endSeconds]
@@ -103,17 +99,37 @@ def consensus_section(
             event = _best_event(specialist.chords, start, end)
             if event is None:
                 continue
-            role_weight = ROLE_WEIGHTS.get(specialist.role, 0.75)
-            _symbol_vote(votes, event.symbol, role_weight * event.confidence)
+            role_weight = profile.role_weights.get(specialist.role, 0.75)
+            _symbol_vote(
+                votes,
+                event.symbol,
+                role_weight * event.confidence,
+                simple_triad_reinforcement=profile.simple_triad_reinforcement,
+            )
             for alternative in event.alternatives[:3]:
-                _symbol_vote(votes, alternative, role_weight * event.confidence * 0.16)
+                _symbol_vote(
+                    votes,
+                    alternative,
+                    role_weight * event.confidence * profile.alternative_weight,
+                    simple_triad_reinforcement=profile.simple_triad_reinforcement,
+                )
 
         if dsp_runs:
             dsp_event = _best_dsp_event(dsp_runs, start, end)
             if dsp_event is not None:
-                _symbol_vote(votes, dsp_event.symbol, 0.48 * dsp_event.confidence)
+                _symbol_vote(
+                    votes,
+                    dsp_event.symbol,
+                    profile.dsp_weight * dsp_event.confidence,
+                    simple_triad_reinforcement=profile.simple_triad_reinforcement,
+                )
                 for alternative in dsp_event.alternatives[:2]:
-                    _symbol_vote(votes, alternative.symbol, 0.12 * alternative.score)
+                    _symbol_vote(
+                        votes,
+                        alternative.symbol,
+                        profile.dsp_weight * profile.alternative_weight * alternative.score,
+                        simple_triad_reinforcement=profile.simple_triad_reinforcement,
+                    )
 
         if not votes:
             votes["X"] = 1.0
@@ -125,7 +141,11 @@ def consensus_section(
         slot_agreements.append(float(agreement))
         slot_alternatives.append([symbol for symbol, _ in ranked[:4]])
 
-    selected = optimize_sequence(slot_scores)
+    selected = optimize_sequence(
+        slot_scores,
+        change_penalty=profile.change_penalty,
+        isolated_penalty=profile.isolated_penalty,
+    )
     source = "hybrid" if dsp_runs else "ai"
     events: list[ChordEvent] = []
     for index, (start, end, symbol) in enumerate(
@@ -157,7 +177,7 @@ def consensus_section(
     current_end = 0.0
     current_candidates: list[str] = []
     for index, agreement in enumerate(slot_agreements):
-        uncertain = agreement < uncertainty_threshold or selected[index] == "X"
+        uncertain = agreement < profile.uncertainty_threshold or selected[index] == "X"
         if uncertain:
             if current_start is None:
                 current_start = boundaries[index]
@@ -192,13 +212,16 @@ def consensus_section(
         agreement=round(mean(slot_agreements), 4) if slot_agreements else 0.0,
         uncertain_ranges=uncertain_ranges,
         slot_alternatives=slot_alternatives,
+        slot_scores=slot_scores,
     )
 
 
 def reconcile_repeated_sections(
     sections: list[tuple[SectionStructureDraft, ConsensusOutput]],
+    *,
+    profile: AccuracyProfile | None = None,
 ) -> None:
-    """Repair only low-confidence disagreements across repeated section types."""
+    profile = profile or load_accuracy_profile()
     groups: dict[str, list[tuple[SectionStructureDraft, ConsensusOutput]]] = defaultdict(list)
     for section, output in sections:
         if section.type in {"chorus", "verse", "pre_chorus"}:
@@ -213,7 +236,8 @@ def reconcile_repeated_sections(
                 output.chords[index].symbol
                 for _, output in group
                 if index < len(output.chords)
-                and output.chords[index].confidence >= 0.68
+                and output.chords[index].confidence
+                >= profile.repeated_section_winner_threshold
             ]
             if len(confident_symbols) < 2:
                 continue
@@ -227,13 +251,23 @@ def reconcile_repeated_sections(
                 if index >= len(output.chords):
                     continue
                 chord = output.chords[index]
-                if chord.confidence >= 0.58 or chord.symbol == winner:
-                    continue
-                if winner not in chord.alternatives:
+                if (
+                    chord.confidence >= profile.repeated_section_confidence_threshold
+                    or chord.symbol == winner
+                    or winner not in chord.alternatives
+                ):
                     continue
                 chord.alternatives = [chord.symbol] + [
-                    value for value in chord.alternatives if value not in {winner, chord.symbol}
+                    value
+                    for value in chord.alternatives
+                    if value not in {winner, chord.symbol}
                 ]
                 chord.symbol = winner
-                chord.confidence = max(chord.confidence, 0.62)
-                chord.agreement = max(chord.agreement or 0.0, 0.62)
+                chord.confidence = max(
+                    chord.confidence,
+                    profile.repeated_section_confidence_threshold + 0.04,
+                )
+                chord.agreement = max(
+                    chord.agreement or 0.0,
+                    profile.repeated_section_confidence_threshold + 0.04,
+                )
