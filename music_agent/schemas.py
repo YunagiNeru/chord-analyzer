@@ -43,108 +43,82 @@ class DspSummary(ApiModel):
     waveform: list[float] = Field(default_factory=list)
 
 
+# The following draft models are model-facing contracts. They are deliberately
+# permissive: semantic range checks and canonicalisation happen in deterministic
+# Python after generation. This prevents one malformed model field from
+# discarding an otherwise useful response.
 class TrackStructureDraft(ApiModel):
     title: str = "不明な楽曲"
     artist: str = "不明"
-    durationSeconds: float = Field(ge=0.001)
-    bpm: float | None = Field(default=None, ge=0.001)
+    durationSeconds: float = 0.001
+    bpm: float | None = None
     timeSignature: str | None = None
     globalKey: str | None = None
     globalMode: str | None = None
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = 0.5
 
 
 class SectionStructureDraft(ApiModel):
-    id: str
-    name: str
-    type: Literal[
-        "intro",
-        "verse",
-        "pre_chorus",
-        "chorus",
-        "post_chorus",
-        "bridge",
-        "interlude",
-        "solo",
-        "breakdown",
-        "outro",
-        "other",
-    ] = "other"
-    startSeconds: float = Field(ge=0.0)
-    endSeconds: float = Field(ge=0.001)
+    id: str = ""
+    name: str = ""
+    type: str = "other"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
     key: str | None = None
     mode: str | None = None
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = 0.5
     notes: str = ""
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "SectionStructureDraft":
-        if self.endSeconds <= self.startSeconds:
-            raise ValueError("endSeconds must be greater than startSeconds")
-        return self
 
 
 class StructureDraft(ApiModel):
-    track: TrackStructureDraft
-    sections: list[SectionStructureDraft] = Field(min_length=1)
+    track: TrackStructureDraft = Field(default_factory=TrackStructureDraft)
+    sections: list[SectionStructureDraft] = Field(default_factory=list)
     observations: list[str] = Field(default_factory=list)
 
 
 class TempoCandidate(ApiModel):
-    bpm: float = Field(ge=20.0, le=320.0)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    bpm: float = 120.0
+    confidence: float = 0.5
     interpretation: str = ""
 
 
 class TempoSegment(ApiModel):
-    startSeconds: float = Field(ge=0.0)
-    endSeconds: float = Field(ge=0.001)
-    bpm: float = Field(ge=20.0, le=320.0)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "TempoSegment":
-        if self.endSeconds <= self.startSeconds:
-            raise ValueError("endSeconds must be greater than startSeconds")
-        return self
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    bpm: float = 120.0
+    confidence: float = 0.5
 
 
 class RhythmDraft(ApiModel):
-    durationSeconds: float = Field(ge=0.001)
+    durationSeconds: float = 0.001
     bpmCandidates: list[TempoCandidate] = Field(default_factory=list)
-    selectedBpm: float | None = Field(default=None, ge=20.0, le=320.0)
+    selectedBpm: float | None = None
     timeSignature: str = "4/4"
-    downbeatOffsetSeconds: float = Field(default=0.0, ge=0.0)
+    downbeatOffsetSeconds: float = 0.0
     globalKey: str | None = None
     globalMode: str | None = None
     tempoSegments: list[TempoSegment] = Field(default_factory=list)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = 0.5
     observations: list[str] = Field(default_factory=list)
 
 
 class HarmonyChordDraft(ApiModel):
-    symbol: str
-    startSeconds: float = Field(ge=0.0)
-    endSeconds: float = Field(ge=0.001)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    symbol: str = "X"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    confidence: float = 0.5
     alternatives: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "HarmonyChordDraft":
-        if self.endSeconds <= self.startSeconds:
-            raise ValueError("endSeconds must be greater than startSeconds")
-        return self
 
 
 class HarmonySectionDraft(ApiModel):
-    sectionId: str
+    sectionId: str = ""
     key: str | None = None
     mode: str | None = None
     chords: list[HarmonyChordDraft] = Field(default_factory=list)
 
 
 class HarmonyDraft(ApiModel):
-    bpm: float | None = Field(default=None, ge=0.001)
+    bpm: float | None = None
     timeSignature: str | None = None
     globalKey: str | None = None
     globalMode: str | None = None
@@ -154,48 +128,26 @@ class HarmonyDraft(ApiModel):
 
 class ChordComponentsDraft(ApiModel):
     root: str | None = None
-    quality: Literal[
-        "major",
-        "minor",
-        "diminished",
-        "augmented",
-        "sus2",
-        "sus4",
-        "power",
-        "no_chord",
-        "unknown",
-    ] = "unknown"
-    seventh: Literal[
-        "none",
-        "minor7",
-        "major7",
-        "diminished7",
-        "unknown",
-    ] = "none"
+    quality: str = "unknown"
+    seventh: str = "none"
     extensions: list[str] = Field(default_factory=list)
     alterations: list[str] = Field(default_factory=list)
     bass: str | None = None
 
 
 class SpecialistChordDraft(ApiModel):
-    symbol: str
-    startSeconds: float = Field(ge=0.0)
-    endSeconds: float = Field(ge=0.001)
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    symbol: str = "X"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    confidence: float = 0.5
     components: ChordComponentsDraft = Field(default_factory=ChordComponentsDraft)
     alternatives: list[str] = Field(default_factory=list)
     evidence: str = ""
 
-    @model_validator(mode="after")
-    def validate_range(self) -> "SpecialistChordDraft":
-        if self.endSeconds <= self.startSeconds:
-            raise ValueError("endSeconds must be greater than startSeconds")
-        return self
-
 
 class SpecialistSectionDraft(ApiModel):
-    sectionId: str
-    role: Literal["root_quality", "bass_extension", "rhythm_pattern"]
+    sectionId: str = ""
+    role: str = ""
     key: str | None = None
     mode: str | None = None
     chords: list[SpecialistChordDraft] = Field(default_factory=list)
@@ -204,17 +156,11 @@ class SpecialistSectionDraft(ApiModel):
 
 
 class ResolutionChoice(ApiModel):
-    startSeconds: float = Field(ge=0.0)
-    endSeconds: float = Field(ge=0.001)
-    chosenSymbol: str
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    chosenSymbol: str = "X"
+    confidence: float = 0.5
     reason: str = ""
-
-    @model_validator(mode="after")
-    def validate_range(self) -> "ResolutionChoice":
-        if self.endSeconds <= self.startSeconds:
-            raise ValueError("endSeconds must be greater than startSeconds")
-        return self
 
 
 class ResolutionDraft(ApiModel):
@@ -228,6 +174,8 @@ class FinalExplanationDraft(ApiModel):
     sectionSummaries: dict[str, str] = Field(default_factory=dict)
 
 
+# Final API models remain strict. Only deterministic Python is allowed to create
+# these objects.
 class ChordEvent(ApiModel):
     symbol: str
     roman: str | None = None
@@ -349,6 +297,7 @@ class AnalysisDiagnostics(ApiModel):
     stageTimings: list[StageTiming] = Field(default_factory=list)
     modelUsage: list[ModelUsage] = Field(default_factory=list)
     invariantErrors: list[str] = Field(default_factory=list)
+    modelErrors: list[str] = Field(default_factory=list)
     sectionSpecialistCalls: int = Field(default=0, ge=0)
     resolverCalls: int = Field(default=0, ge=0)
     gridScore: float | None = None
