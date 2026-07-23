@@ -3,11 +3,16 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from music_agent.accuracy_profile import AccuracyProfile, load_accuracy_profile
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from music_agent.accuracy_profile import AccuracyProfile
 from music_agent.chord_symbol import parse_chord
 from music_agent.sequence_optimizer import optimize_sequence
 
