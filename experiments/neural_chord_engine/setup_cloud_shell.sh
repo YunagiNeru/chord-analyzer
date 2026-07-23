@@ -13,7 +13,8 @@ sudo apt-get install -y --no-install-recommends \
   ffmpeg \
   fluidsynth \
   libsndfile1-dev \
-  pkg-config
+  pkg-config \
+  portaudio19-dev
 
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
