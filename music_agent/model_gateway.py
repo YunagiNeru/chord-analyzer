@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Any, TypeVar
@@ -45,6 +46,21 @@ class ModelGateway:
         )
         return input_tokens, output_tokens
 
+    @staticmethod
+    def _parse_response(response: Any, schema: type[SchemaT]) -> SchemaT:
+        parsed = response.parsed
+        if isinstance(parsed, schema):
+            return parsed
+        if parsed is not None:
+            return schema.model_validate(parsed)
+        if not response.text:
+            raise RuntimeError("Geminiから空の応答が返されました。")
+        try:
+            payload = json.loads(response.text)
+        except json.JSONDecodeError:
+            return schema.model_validate_json(response.text)
+        return schema.model_validate(payload)
+
     def generate_typed(
         self,
         *,
@@ -53,15 +69,24 @@ class ModelGateway:
         system_instruction: str,
         temperature: float = 0.0,
         max_output_tokens: int = 16_384,
-        retries: int = 2,
+        retries: int = 3,
+        diagnostic_label: str | None = None,
     ) -> SchemaT:
         last_error: Exception | None = None
+        base_contents = list(contents)
         for attempt in range(max(1, retries)):
+            request_contents = list(base_contents)
+            if attempt:
+                request_contents.append(
+                    "前回の出力はJSONスキーマ検証に失敗しました。"
+                    "必須フィールドの型を守り、数値は有限値、配列は配列、"
+                    "不明値は推測せず既定値または空配列で返してください。"
+                )
             try:
                 with self._semaphore:
                     response = self.client.models.generate_content(
                         model=self.model,
-                        contents=contents,
+                        contents=request_contents,
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
                             response_mime_type="application/json",
@@ -76,16 +101,13 @@ class ModelGateway:
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
-                parsed = response.parsed
-                if isinstance(parsed, schema):
-                    return parsed
-                if parsed is not None:
-                    return schema.model_validate(parsed)
-                if not response.text:
-                    raise RuntimeError("Geminiから空の応答が返されました。")
-                return schema.model_validate_json(response.text)
+                return self._parse_response(response, schema)
             except Exception as exc:  # noqa: BLE001 - retry boundary
                 last_error = exc
+                self.diagnostics.record_error(
+                    diagnostic_label or schema.__name__,
+                    exc,
+                )
                 if attempt + 1 < max(1, retries):
                     time.sleep(0.6 * (attempt + 1))
         assert last_error is not None
