@@ -74,12 +74,24 @@ class FakeGateway:
                     SpecialistChordDraft(
                         symbol="C",
                         startSeconds=0.0,
-                        endSeconds=4.0,
+                        endSeconds=2.0,
                         confidence=0.95,
                     ),
                     SpecialistChordDraft(
                         symbol="G",
+                        startSeconds=2.0,
+                        endSeconds=4.0,
+                        confidence=0.95,
+                    ),
+                    SpecialistChordDraft(
+                        symbol="Am",
                         startSeconds=4.0,
+                        endSeconds=6.0,
+                        confidence=0.95,
+                    ),
+                    SpecialistChordDraft(
+                        symbol="F",
+                        startSeconds=6.0,
                         endSeconds=8.0,
                         confidence=0.95,
                     ),
@@ -137,7 +149,7 @@ class PipelineV2Tests(unittest.TestCase):
             for measure in section.measures
             for chord in measure.chords
         ]
-        self.assertEqual(chords, ["C", "G"])
+        self.assertEqual(chords, ["C", "G", "Am", "F"])
 
 
 if __name__ == "__main__":
