@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from music_agent.chord_symbol import parse_chord
 from music_agent.schemas import AnalysisResult
@@ -95,7 +100,10 @@ def boundary_recall(
     if not reference_boundaries:
         return 1.0
     matched = sum(
-        any(abs(reference_time - predicted_time) <= tolerance_seconds for predicted_time in predicted_boundaries)
+        any(
+            abs(reference_time - predicted_time) <= tolerance_seconds
+            for predicted_time in predicted_boundaries
+        )
         for reference_time in reference_boundaries
     )
     return matched / len(reference_boundaries)
@@ -114,19 +122,22 @@ def main() -> int:
     root, majmin = weighted_scores(reference, predicted)
     bpm = result.track.bpm or 120.0
     half_beat = 30.0 / bpm
+    invariant_errors = validate_invariants(result)
+    boundary_score = boundary_recall(
+        reference,
+        predicted,
+        tolerance_seconds=half_beat,
+    )
     payload = {
         "rootWeightedAccuracy": round(root, 6),
         "majorMinorWeightedAccuracy": round(majmin, 6),
-        "changeBoundaryRecallHalfBeat": round(
-            boundary_recall(reference, predicted, tolerance_seconds=half_beat),
-            6,
-        ),
-        "invariantErrors": validate_invariants(result),
+        "changeBoundaryRecallHalfBeat": round(boundary_score, 6),
+        "invariantErrors": invariant_errors,
         "gates": {
             "root": root >= 0.85,
             "majorMinor": majmin >= 0.80,
-            "boundary": boundary_recall(reference, predicted, tolerance_seconds=half_beat) >= 0.80,
-            "invariants": not validate_invariants(result),
+            "boundary": boundary_score >= 0.80,
+            "invariants": not invariant_errors,
         },
     }
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
