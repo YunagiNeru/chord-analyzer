@@ -14,6 +14,7 @@ class DiagnosticsRecorder:
     pipeline: str = "accuracy-v2"
     _timings: list[StageTiming] = field(default_factory=list)
     _usage: dict[str, ModelUsage] = field(default_factory=dict)
+    _errors: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     section_specialist_calls: int = 0
     resolver_calls: int = 0
@@ -45,12 +46,24 @@ class DiagnosticsRecorder:
             usage.inputTokens += max(0, int(input_tokens))
             usage.outputTokens += max(0, int(output_tokens))
 
+    def record_error(self, label: str, exc: BaseException) -> None:
+        detail = str(exc).replace("\n", " ").strip()
+        if len(detail) > 600:
+            detail = detail[:597] + "..."
+        rendered = f"{label}: {type(exc).__name__}"
+        if detail:
+            rendered += f": {detail}"
+        with self._lock:
+            if rendered not in self._errors:
+                self._errors.append(rendered)
+
     def build(self, invariant_errors: list[str]) -> AnalysisDiagnostics:
         return AnalysisDiagnostics(
             pipeline=self.pipeline,
             stageTimings=list(self._timings),
             modelUsage=sorted(self._usage.values(), key=lambda item: item.model),
             invariantErrors=list(invariant_errors),
+            modelErrors=list(self._errors),
             sectionSpecialistCalls=self.section_specialist_calls,
             resolverCalls=self.resolver_calls,
             gridScore=self.grid_score,
