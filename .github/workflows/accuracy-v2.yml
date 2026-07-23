@@ -9,6 +9,7 @@ on:
       - "music_agent/**"
       - "main.py"
       - "requirements.txt"
+      - "scripts/**"
       - "tests/**"
       - ".github/workflows/accuracy-v2.yml"
 
@@ -30,8 +31,24 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
       - name: Compile Python source
-        run: python -m compileall -q main.py music_agent tests
-      - name: Run unit tests
+        run: python -m compileall -q main.py music_agent scripts tests
+      - name: Test chord symbols
+        run: python -m unittest tests.test_chord_symbol -v
+      - name: Test beat grid
+        run: python -m unittest tests.test_beat_grid -v
+      - name: Test sequence optimizer
+        run: python -m unittest tests.test_sequence_optimizer -v
+      - name: Test consensus
+        run: python -m unittest tests.test_consensus -v
+      - name: Test validators
+        run: python -m unittest tests.test_validators -v
+      - name: Test media sources
+        run: python -m unittest tests.test_media_source -v
+      - name: Test API compatibility
+        run: python -m unittest tests.test_api_compatibility -v
+      - name: Test pipeline orchestration
+        run: python -m unittest tests.test_pipeline_v2 -v
+      - name: Run complete test discovery
         run: python -m unittest discover -s tests -v
       - name: Validate dependency graph
         run: python -m pip check
