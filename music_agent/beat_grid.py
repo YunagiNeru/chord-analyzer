@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from statistics import median
 
+from .accuracy_profile import AccuracyProfile, load_accuracy_profile
 from .schemas import DspSummary, RhythmDraft, SectionStructureDraft, TempoSegment
 
 
@@ -49,17 +50,15 @@ def beats_per_bar(value: str | None) -> int:
     match = _TIME_SIGNATURE_RE.fullmatch(value)
     if not match:
         return 4
-    numerator = int(match.group(1))
-    return max(1, min(12, numerator))
+    return max(1, min(12, int(match.group(1))))
 
 
 def _normalise_bpm(value: float) -> list[float]:
-    candidates: list[float] = []
-    for multiplier in (0.5, 1.0, 2.0):
-        candidate = value * multiplier
-        if 40.0 <= candidate <= 240.0:
-            candidates.append(round(candidate, 4))
-    return candidates
+    return [
+        round(value * multiplier, 4)
+        for multiplier in (0.5, 1.0, 2.0)
+        if 40.0 <= value * multiplier <= 240.0
+    ]
 
 
 def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[float]:
@@ -70,9 +69,7 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[float]:
         values.extend(_normalise_bpm(float(candidate.bpm)))
     if dsp and dsp.bpm:
         values.extend(_normalise_bpm(float(dsp.bpm)))
-    if not values:
-        values = [120.0]
-    return sorted(set(values))
+    return sorted(set(values or [120.0]))
 
 
 def _integer_bar_error(
@@ -81,21 +78,16 @@ def _integer_bar_error(
     sections: list[SectionStructureDraft],
 ) -> float:
     bar_duration = (60.0 / bpm) * beats
-    errors: list[float] = []
+    errors = []
     for section in sections:
         length = section.endSeconds - section.startSeconds
-        if length < bar_duration * 0.7:
-            continue
-        bars = length / bar_duration
-        errors.append(abs(bars - round(bars)))
+        if length >= bar_duration * 0.7:
+            bars = length / bar_duration
+            errors.append(abs(bars - round(bars)))
     return median(errors) if errors else 0.5
 
 
-def _beat_alignment_error(
-    bpm: float,
-    offset: float,
-    observed: list[float],
-) -> float:
+def _beat_alignment_error(bpm: float, offset: float, observed: list[float]) -> float:
     if not observed:
         return 0.5
     beat_duration = 60.0 / bpm
@@ -129,8 +121,7 @@ def _offset_candidates(
     bar_duration = (60.0 / bpm) * beats
     values = [max(0.0, min(bar_duration, float(rhythm.downbeatOffsetSeconds)))]
     if dsp and dsp.beatTimes:
-        for value in dsp.beatTimes[: min(24, len(dsp.beatTimes))]:
-            values.append(float(value) % bar_duration)
+        values.extend(float(value) % bar_duration for value in dsp.beatTimes[:24])
     steps = max(8, beats * 8)
     values.extend((bar_duration * index) / steps for index in range(steps))
     return sorted(set(round(value, 5) for value in values))
@@ -142,7 +133,9 @@ def build_beat_grid(
     sections: list[SectionStructureDraft],
     duration: float,
     dsp: DspSummary | None = None,
+    profile: AccuracyProfile | None = None,
 ) -> BeatGrid:
+    profile = profile or load_accuracy_profile()
     signature = rhythm.timeSignature or "4/4"
     beats = beats_per_bar(signature)
     observed = list(dsp.beatTimes) if dsp else []
@@ -156,12 +149,15 @@ def build_beat_grid(
             model_prior = 0.0
             if rhythm.selectedBpm:
                 ratio = max(bpm, rhythm.selectedBpm) / min(bpm, rhythm.selectedBpm)
-                model_prior = min(1.0, abs(math.log2(ratio))) * 0.12
+                model_prior = (
+                    min(1.0, abs(math.log2(ratio)))
+                    * profile.grid_model_prior_weight
+                )
             score = 1.0 - min(
                 1.0,
-                integer_error * 0.42
-                + beat_error * 0.34
-                + section_error * 0.18
+                integer_error * profile.grid_integer_bar_weight
+                + beat_error * profile.grid_beat_alignment_weight
+                + section_error * profile.grid_section_alignment_weight
                 + model_prior,
             )
             if best is None or score > best[0]:
