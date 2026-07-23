@@ -45,15 +45,11 @@ class ParsedChord:
 
     @property
     def root_pc(self) -> int | None:
-        if self.root is None:
-            return None
-        return NOTE_TO_PC.get(self.root.upper())
+        return NOTE_TO_PC.get(self.root.upper()) if self.root else None
 
     @property
     def bass_pc(self) -> int | None:
-        if self.bass is None:
-            return None
-        return NOTE_TO_PC.get(self.bass.upper())
+        return NOTE_TO_PC.get(self.bass.upper()) if self.bass else None
 
 
 ROOT_RE = re.compile(r"^([A-Ga-g])([#b♯♭]?)(.*)$")
@@ -67,8 +63,8 @@ def canonicalize_note(note: str | None) -> str | None:
     if not match:
         return None
     token = (match.group(1).upper() + match.group(2)).upper()
-    pc = NOTE_TO_PC.get(token)
-    return PC_TO_NOTE[pc] if pc is not None else None
+    pitch_class = NOTE_TO_PC.get(token)
+    return PC_TO_NOTE[pitch_class] if pitch_class is not None else None
 
 
 def _normalise_suffix(raw: str) -> str:
@@ -77,8 +73,7 @@ def _normalise_suffix(raw: str) -> str:
     value = value.replace("°", "dim").replace("＋", "+")
     value = value.replace("minor", "m").replace("min", "m")
     value = value.replace("major", "maj")
-    value = re.sub(r"\s+", "", value)
-    return value
+    return re.sub(r"\s+", "", value)
 
 
 def parse_chord(symbol: str | None) -> ParsedChord:
@@ -104,6 +99,7 @@ def parse_chord(symbol: str | None) -> ParsedChord:
     root = canonicalize_note(match.group(1) + match.group(2))
     suffix = _normalise_suffix(match.group(3))
     lower = suffix.lower()
+    original_lower = lower
 
     quality = "major"
     seventh = "none"
@@ -113,17 +109,20 @@ def parse_chord(symbol: str | None) -> ParsedChord:
     if lower.startswith(("m7-5", "m7b5", "halfdim")):
         quality = "diminished"
         seventh = "minor7"
-        lower = lower.replace("m7-5", "", 1).replace("m7b5", "", 1).replace("halfdim", "", 1)
+        for prefix in ("m7-5", "m7b5", "halfdim"):
+            if lower.startswith(prefix):
+                lower = lower[len(prefix):]
+                break
     elif lower.startswith(("dim7", "o7")):
         quality = "diminished"
         seventh = "diminished7"
-        lower = lower.replace("dim7", "", 1).replace("o7", "", 1)
+        lower = lower[4:] if lower.startswith("dim7") else lower[2:]
     elif lower.startswith(("dim", "o")):
         quality = "diminished"
-        lower = lower.replace("dim", "", 1).lstrip("o")
+        lower = lower[3:] if lower.startswith("dim") else lower[1:]
     elif lower.startswith(("aug", "+")):
         quality = "augmented"
-        lower = lower.replace("aug", "", 1).lstrip("+")
+        lower = lower[3:] if lower.startswith("aug") else lower[1:]
     elif lower.startswith("sus2"):
         quality = "sus2"
         lower = lower[4:]
@@ -133,6 +132,12 @@ def parse_chord(symbol: str | None) -> ParsedChord:
     elif lower.startswith("5"):
         quality = "power"
         lower = lower[1:]
+    elif lower.startswith(("maj13", "maj11", "maj9")):
+        quality = "major"
+        seventh = "major7"
+        extension = next(token for token in ("13", "11", "9") if lower.startswith("maj" + token))
+        extensions.append(extension)
+        lower = lower[len("maj" + extension):]
     elif lower.startswith("maj7"):
         quality = "major"
         seventh = "major7"
@@ -154,6 +159,13 @@ def parse_chord(symbol: str | None) -> ParsedChord:
         elif lower.startswith("6"):
             extensions.append("6")
             lower = lower[1:]
+        elif lower.startswith(("13", "11", "9")):
+            seventh = "minor7"
+
+    for add_token in ("add13", "add11", "add9"):
+        if add_token in lower:
+            extensions.append(add_token)
+            lower = lower.replace(add_token, "")
 
     for token in ("13", "11", "9", "6"):
         if token in lower:
@@ -161,13 +173,13 @@ def parse_chord(symbol: str | None) -> ParsedChord:
             lower = lower.replace(token, "")
 
     for token in ("b13", "#11", "b9", "#9", "b5", "#5"):
-        if token in suffix.lower():
-            alterations.append(token)
-
-    if "add9" in suffix.lower() and "9" not in extensions:
-        extensions.append("add9")
-    if "add11" in suffix.lower() and "11" not in extensions:
-        extensions.append("add11")
+        if token not in original_lower:
+            continue
+        if token == "b5" and quality == "diminished":
+            continue
+        if token == "#5" and quality == "augmented":
+            continue
+        alterations.append(token)
 
     return ParsedChord(
         root=root,
@@ -218,10 +230,10 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
             if alteration not in suffix:
                 suffix += alteration
 
-    bass = ""
+    bass_suffix = ""
     if chord.bass and chord.bass != chord.root:
-        bass = f"/{chord.bass}"
-    return f"{chord.root}{suffix}{bass}"
+        bass_suffix = f"/{chord.bass}"
+    return f"{chord.root}{suffix}{bass_suffix}"
 
 
 def canonicalize_symbol(symbol: str | None, *, simplify: bool = False) -> str:
@@ -258,32 +270,35 @@ def transpose_symbol(symbol: str, semitones: int) -> str:
 
 
 def chord_distance(left: str, right: str) -> float:
-    a = parse_chord(left)
-    b = parse_chord(right)
-    if format_chord(a) == format_chord(b):
+    left_chord = parse_chord(left)
+    right_chord = parse_chord(right)
+    if format_chord(left_chord) == format_chord(right_chord):
         return 0.0
-    if a.no_chord or b.no_chord:
+    if left_chord.no_chord or right_chord.no_chord:
         return 1.4
-    if a.unknown or b.unknown:
+    if left_chord.unknown or right_chord.unknown:
         return 0.8
     distance = 0.0
-    if a.root_pc != b.root_pc:
-        if a.root_pc is None or b.root_pc is None:
+    if left_chord.root_pc != right_chord.root_pc:
+        if left_chord.root_pc is None or right_chord.root_pc is None:
             distance += 1.0
         else:
-            interval = abs(a.root_pc - b.root_pc)
+            interval = abs(left_chord.root_pc - right_chord.root_pc)
             interval = min(interval, 12 - interval)
             distance += 0.55 + 0.08 * interval
-    if a.quality != b.quality:
+    if left_chord.quality != right_chord.quality:
         distance += 0.55
-    if a.seventh != b.seventh:
+    if left_chord.seventh != right_chord.seventh:
         distance += 0.16
-    if a.bass_pc != b.bass_pc:
+    if left_chord.bass_pc != right_chord.bass_pc:
         distance += 0.12
     return distance
 
 
 def same_root_quality(left: str, right: str) -> bool:
-    a = parse_chord(left)
-    b = parse_chord(right)
-    return a.root_pc == b.root_pc and a.quality == b.quality
+    left_chord = parse_chord(left)
+    right_chord = parse_chord(right)
+    return (
+        left_chord.root_pc == right_chord.root_pc
+        and left_chord.quality == right_chord.quality
+    )
