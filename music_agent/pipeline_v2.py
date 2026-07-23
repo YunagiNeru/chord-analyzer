@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from statistics import mean
@@ -8,6 +9,7 @@ from typing import Any
 from google import genai
 
 from .beat_grid import BeatGrid, build_beat_grid
+from .chord_symbol import canonicalize_symbol
 from .consensus import ConsensusOutput, consensus_section, reconcile_repeated_sections
 from .diagnostics import DiagnosticsRecorder
 from .dsp import analyze_audio_file
@@ -30,6 +32,7 @@ from .schemas import (
     AnalysisResult,
     DspSummary,
     FinalExplanationDraft,
+    ResolutionDraft,
     RhythmDraft,
     SectionResult,
     SectionStructureDraft,
@@ -37,17 +40,32 @@ from .schemas import (
     StructureDraft,
     TempoCandidate,
     TrackResult,
+    TrackStructureDraft,
 )
 from .validators import (
     apply_resolution,
     build_section_result,
     normalise_sections,
+    normalise_specialist_result,
     validate_invariants,
+    validate_quality,
 )
 from .youtube_metadata import YouTubeMetadata, resolve_youtube_metadata
 
 
 SPECIALIST_ROLES = ("root_quality", "bass_extension", "rhythm_pattern")
+
+
+def _finite(value: object, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _confidence(value: object, default: float = 0.5) -> float:
+    return max(0.0, min(1.0, _finite(value, default)))
 
 
 class AccuracyPipelineV2:
@@ -103,43 +121,6 @@ class AccuracyPipelineV2:
         return metadata.to_prompt_dict() if metadata else {}
 
     @staticmethod
-    def _fallback_structure(
-        *,
-        source_label: str,
-        duration: float,
-        metadata: YouTubeMetadata | None,
-        dsp: DspSummary | None,
-    ) -> StructureDraft:
-        from .schemas import SectionStructureDraft, TrackStructureDraft
-
-        title = metadata.title if metadata and metadata.title else source_label
-        artist = metadata.channel_title if metadata and metadata.channel_title else "不明"
-        key = dsp.keyCandidates[0].key if dsp and dsp.keyCandidates else None
-        return StructureDraft(
-            track=TrackStructureDraft(
-                title=title,
-                artist=artist,
-                durationSeconds=max(0.001, duration),
-                bpm=dsp.bpm if dsp else None,
-                globalKey=key,
-                confidence=0.2,
-            ),
-            sections=[
-                SectionStructureDraft(
-                    id="full-track",
-                    name="全体",
-                    type="other",
-                    startSeconds=0.0,
-                    endSeconds=max(0.001, duration),
-                    key=key,
-                    confidence=0.2,
-                    notes="構造分析が失敗したため全体区間へフォールバックしました。",
-                )
-            ],
-            observations=["structure_fallback"],
-        )
-
-    @staticmethod
     def _fallback_rhythm(duration: float, dsp: DspSummary | None) -> RhythmDraft:
         bpm = dsp.bpm if dsp and dsp.bpm else 120.0
         key = dsp.keyCandidates[0].key if dsp and dsp.keyCandidates else None
@@ -160,16 +141,135 @@ class AccuracyPipelineV2:
         structure: StructureDraft | None,
         rhythm: RhythmDraft | None,
     ) -> float:
-        values = [
-            float(value)
-            for value in (
-                known_duration,
-                structure.track.durationSeconds if structure else None,
-                rhythm.durationSeconds if rhythm else None,
-            )
-            if value is not None and float(value) > 0
-        ]
-        return max(0.001, values[0] if known_duration else max(values, default=0.001))
+        known = _finite(known_duration, 0.0) if known_duration is not None else 0.0
+        if known > 0:
+            return known
+        values = []
+        if structure:
+            values.append(_finite(structure.track.durationSeconds, 0.0))
+        if rhythm:
+            values.append(_finite(rhythm.durationSeconds, 0.0))
+        return max(0.001, max(values, default=0.001))
+
+    @staticmethod
+    def _minimum_sections(duration: float) -> int:
+        if duration < 45.0:
+            return 1
+        if duration < 90.0:
+            return 2
+        return 3
+
+    @classmethod
+    def _usable_sections(
+        cls,
+        structure: StructureDraft | None,
+        *,
+        duration: float,
+    ) -> list[SectionStructureDraft]:
+        if structure is None:
+            return []
+        sections = normalise_sections(structure.sections, duration=duration, max_sections=12)
+        if len(sections) < cls._minimum_sections(duration):
+            return []
+        if duration >= 90.0 and any(
+            section.endSeconds - section.startSeconds > duration * 0.82
+            for section in sections
+        ):
+            return []
+        return sections
+
+    def _windowed_structure(
+        self,
+        *,
+        media: AnalysisMediaSource,
+        gateway: ModelGateway,
+        source_label: str,
+        duration: float,
+        dsp: DspSummary | None,
+        metadata: dict[str, Any],
+        diagnostics: DiagnosticsRecorder,
+    ) -> StructureDraft:
+        window_seconds = 55.0
+        overlap_seconds = 5.0
+        starts: list[float] = []
+        current = 0.0
+        while current < duration - 0.1:
+            starts.append(current)
+            next_value = current + window_seconds - overlap_seconds
+            if next_value <= current:
+                break
+            current = next_value
+
+        sections: list[SectionStructureDraft] = []
+        track = TrackStructureDraft(durationSeconds=duration)
+        with diagnostics.stage("windowed-structure-recovery"):
+            with ThreadPoolExecutor(max_workers=self.max_parallel_calls) as executor:
+                futures: dict[Future[StructureDraft], tuple[int, float, float]] = {}
+                for index, start in enumerate(starts):
+                    end = min(duration, start + window_seconds)
+                    window_metadata = dict(metadata)
+                    window_metadata["analysisWindow"] = {
+                        "startSeconds": start,
+                        "endSeconds": end,
+                        "timestampsMayBeClipRelative": True,
+                    }
+                    future = executor.submit(
+                        gateway.generate_typed,
+                        contents=[
+                            media.part(start, end),
+                            build_structure_prompt(
+                                f"{source_label} [{start:.3f}-{end:.3f}]",
+                                duration,
+                                dsp,
+                                window_metadata,
+                            ),
+                        ],
+                        schema=StructureDraft,
+                        system_instruction=STRUCTURE_SYSTEM_PROMPT,
+                        temperature=0.0,
+                        max_output_tokens=6_144,
+                        diagnostic_label=f"structure-window-{index + 1}",
+                    )
+                    futures[future] = (index, start, end)
+
+                for future in as_completed(futures):
+                    index, start, end = futures[future]
+                    try:
+                        draft = future.result()
+                    except Exception as exc:  # noqa: BLE001
+                        diagnostics.record_error(f"structure-window-{index + 1}", exc)
+                        continue
+                    if draft.track.title and draft.track.title != "不明な楽曲":
+                        track = draft.track
+                    clip_duration = end - start
+                    times = [
+                        _finite(value, -1.0)
+                        for section in draft.sections
+                        for value in (section.startSeconds, section.endSeconds)
+                    ]
+                    valid_times = [value for value in times if value >= 0.0]
+                    relative = bool(valid_times) and max(valid_times) <= clip_duration + 1.0 and start > 0.0
+                    offset = start if relative else 0.0
+                    for local_index, section in enumerate(draft.sections, start=1):
+                        section_start = _finite(section.startSeconds, -1.0) + offset
+                        section_end = _finite(section.endSeconds, -1.0) + offset
+                        if section_start < 0.0 or section_end <= section_start:
+                            continue
+                        sections.append(
+                            section.model_copy(
+                                update={
+                                    "id": f"window-{index + 1}-{section.id or local_index}",
+                                    "startSeconds": section_start,
+                                    "endSeconds": section_end,
+                                }
+                            )
+                        )
+
+        return StructureDraft(
+            track=track.model_copy(update={"durationSeconds": duration}),
+            sections=sections,
+            observations=["windowed_structure_recovery"],
+        )
 
     def _run(
         self,
@@ -199,7 +299,6 @@ class AccuracyPipelineV2:
             )
         )
         metadata_dict = self._metadata_dict(youtube_metadata)
-        duration_hint = known_duration or (dsp.durationSeconds if dsp else None) or 360.0
         global_part = media.part()
         structure: StructureDraft | None = None
         rhythm: RhythmDraft | None = None
@@ -224,6 +323,7 @@ class AccuracyPipelineV2:
                         system_instruction=STRUCTURE_SYSTEM_PROMPT,
                         temperature=0.0,
                         max_output_tokens=12_288,
+                        diagnostic_label="global-structure",
                     ),
                     "rhythm": executor.submit(
                         gateway.generate_typed,
@@ -240,6 +340,7 @@ class AccuracyPipelineV2:
                         system_instruction=RHYTHM_SYSTEM_PROMPT,
                         temperature=0.0,
                         max_output_tokens=8_192,
+                        diagnostic_label="global-rhythm",
                     ),
                 }
                 if source_type == "youtube" and self.enable_reference_research:
@@ -251,8 +352,9 @@ class AccuracyPipelineV2:
                 for name, future in futures.items():
                     try:
                         value = future.result()
-                    except Exception as exc:  # noqa: BLE001 - guarded model boundary
-                        global_warnings.append(f"{name} failed: {type(exc).__name__}")
+                    except Exception as exc:  # noqa: BLE001
+                        diagnostics.record_error(name, exc)
+                        global_warnings.append(f"{name} failed: {type(exc).__name__}: {str(exc)[:240]}")
                         continue
                     if name == "structure":
                         structure = value
@@ -262,17 +364,30 @@ class AccuracyPipelineV2:
                         references = value
 
         duration = self._duration(known_duration, structure, rhythm)
-        if structure is None:
-            structure = self._fallback_structure(
-                source_label=source_label,
-                duration=duration,
-                metadata=youtube_metadata,
-                dsp=dsp,
-            )
         if rhythm is None:
             rhythm = self._fallback_rhythm(duration, dsp)
+            global_warnings.append("リズム分析が失敗したため、保守的なテンポ候補を使用しました。")
 
-        # Authoritative source metadata always wins over model guesses.
+        sections = self._usable_sections(structure, duration=duration)
+        if not sections:
+            global_warnings.append("全曲構造分析が品質基準を満たさなかったため、時間窓で再解析しました。")
+            structure = self._windowed_structure(
+                media=media,
+                gateway=gateway,
+                source_label=source_label,
+                duration=duration,
+                dsp=dsp,
+                metadata=metadata_dict,
+                diagnostics=diagnostics,
+            )
+            sections = self._usable_sections(structure, duration=duration)
+
+        if structure is None or not sections:
+            raise RuntimeError(
+                "Accuracy v2 structure analysis failed quality gates; "
+                "no result was returned instead of fabricating a full-track section."
+            )
+
         track_updates: dict[str, Any] = {"durationSeconds": duration}
         if youtube_metadata:
             if youtube_metadata.title:
@@ -282,12 +397,14 @@ class AccuracyPipelineV2:
         structure.track = structure.track.model_copy(update=track_updates)
         rhythm.durationSeconds = duration
         for bpm in references.bpm_candidates:
-            if not any(abs(item.bpm - bpm) < 0.1 for item in rhythm.bpmCandidates):
+            if 20.0 <= bpm <= 320.0 and not any(
+                abs(_finite(item.bpm, 0.0) - bpm) < 0.1
+                for item in rhythm.bpmCandidates
+            ):
                 rhythm.bpmCandidates.append(
                     TempoCandidate(bpm=bpm, confidence=0.35, interpretation="grounded-reference")
                 )
 
-        sections = normalise_sections(structure.sections, duration=duration, max_sections=8)
         global_key = rhythm.globalKey or structure.track.globalKey
         global_mode = rhythm.globalMode or structure.track.globalMode
         sections = [
@@ -324,7 +441,10 @@ class AccuracyPipelineV2:
         }
         with diagnostics.stage("section-specialists"):
             with ThreadPoolExecutor(max_workers=self.max_parallel_calls) as executor:
-                future_map: dict[Future[SpecialistSectionDraft], tuple[SectionStructureDraft, str]] = {}
+                future_map: dict[
+                    Future[SpecialistSectionDraft],
+                    tuple[SectionStructureDraft, str, str],
+                ] = {}
                 for section in sections:
                     clip_start, clip_end = section_clip_bounds[section.id]
                     for role in SPECIALIST_ROLES:
@@ -344,23 +464,64 @@ class AccuracyPipelineV2:
                             system_instruction=SPECIALIST_SYSTEM_PROMPTS[role],
                             temperature=0.0,
                             max_output_tokens=8_192,
+                            diagnostic_label=f"specialist-{section.id}-{role}",
                         )
-                        future_map[future] = (section, role)
+                        future_map[future] = (section, role, prompt)
+
                 for future in as_completed(future_map):
-                    section, role = future_map[future]
+                    section, role, prompt = future_map[future]
                     diagnostics.section_specialist_calls += 1
+                    clip_start, clip_end = section_clip_bounds[section.id]
                     try:
-                        result = future.result()
+                        raw_result = future.result()
                     except Exception as exc:  # noqa: BLE001
+                        diagnostics.record_error(f"specialist-{section.id}-{role}", exc)
                         global_warnings.append(
-                            f"specialist {section.id}/{role} failed: {type(exc).__name__}"
+                            f"specialist {section.id}/{role} failed: {type(exc).__name__}: {str(exc)[:200]}"
                         )
-                        result = SpecialistSectionDraft(
-                            sectionId=section.id,
-                            role=role,
-                            key=section.key,
-                            mode=section.mode,
-                            observations=["specialist_failed"],
+                        raw_result = SpecialistSectionDraft()
+
+                    result = normalise_specialist_result(
+                        raw_result,
+                        section=section,
+                        role=role,
+                        clip_start=clip_start,
+                        clip_end=clip_end,
+                        beat_duration=grid.beat_duration,
+                    )
+                    if not result.chords:
+                        try:
+                            retry_raw = gateway.generate_typed(
+                                contents=[
+                                    section_parts[section.id],
+                                    prompt,
+                                    "前回はコードイベントが空でした。"
+                                    "担当区間を最低でも小節単位で再確認し、"
+                                    "聴き取れない箇所だけXとしてコードイベント配列を返してください。",
+                                ],
+                                schema=SpecialistSectionDraft,
+                                system_instruction=SPECIALIST_SYSTEM_PROMPTS[role],
+                                temperature=0.0,
+                                max_output_tokens=8_192,
+                                retries=1,
+                                diagnostic_label=f"specialist-empty-retry-{section.id}-{role}",
+                            )
+                            result = normalise_specialist_result(
+                                retry_raw,
+                                section=section,
+                                role=role,
+                                clip_start=clip_start,
+                                clip_end=clip_end,
+                                beat_duration=grid.beat_duration,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            diagnostics.record_error(
+                                f"specialist-empty-retry-{section.id}-{role}",
+                                exc,
+                            )
+                    if not result.chords:
+                        global_warnings.append(
+                            f"specialist {section.id}/{role} returned no usable chord events"
                         )
                     specialist_results[section.id].append(result)
 
@@ -395,7 +556,10 @@ class AccuracyPipelineV2:
         )[: self.max_resolver_calls]
         with diagnostics.stage("targeted-resolution"):
             for target in resolver_targets:
-                pair = next((pair for pair in consensus_pairs if pair[0].id == target.sectionId), None)
+                pair = next(
+                    (pair for pair in consensus_pairs if pair[0].id == target.sectionId),
+                    None,
+                )
                 if pair is None:
                     continue
                 section, output = pair
@@ -407,8 +571,14 @@ class AccuracyPipelineV2:
                     elif chord.startSeconds >= target.endSeconds - 1e-3:
                         next_symbol = chord.symbol
                         break
-                clip_start = max(0.0, target.startSeconds - grid.beat_duration * grid.beats_per_bar)
-                clip_end = min(duration, target.endSeconds + grid.beat_duration * grid.beats_per_bar)
+                clip_start = max(
+                    0.0,
+                    target.startSeconds - grid.beat_duration * grid.beats_per_bar,
+                )
+                clip_end = min(
+                    duration,
+                    target.endSeconds + grid.beat_duration * grid.beats_per_bar,
+                )
                 try:
                     resolution = resolver_gateway.generate_typed(
                         contents=[
@@ -424,20 +594,26 @@ class AccuracyPipelineV2:
                                 grid=grid,
                             ),
                         ],
-                        schema=__import__(
-                            "music_agent.schemas", fromlist=["ResolutionDraft"]
-                        ).ResolutionDraft,
+                        schema=ResolutionDraft,
                         system_instruction=RESOLUTION_SYSTEM_PROMPT,
                         temperature=0.0,
                         max_output_tokens=2_048,
+                        diagnostic_label=f"resolver-{target.sectionId}",
                     )
                     diagnostics.resolver_calls += 1
+                    usable_choices = [
+                        choice
+                        for choice in resolution.choices
+                        if canonicalize_symbol(choice.chosenSymbol) != "X"
+                        and choice.endSeconds > choice.startSeconds
+                    ]
                     apply_resolution(output.chords, resolution)
-                    if resolution.choices:
+                    if usable_choices:
                         target.resolved = True
                 except Exception as exc:  # noqa: BLE001
+                    diagnostics.record_error(f"resolver-{target.sectionId}", exc)
                     global_warnings.append(
-                        f"resolver {target.sectionId} failed: {type(exc).__name__}"
+                        f"resolver {target.sectionId} failed: {type(exc).__name__}: {str(exc)[:200]}"
                     )
 
         preliminary_sections: list[SectionResult] = [
@@ -491,21 +667,30 @@ class AccuracyPipelineV2:
                     system_instruction=FINAL_EXPLANATION_SYSTEM_PROMPT,
                     temperature=0.0,
                     max_output_tokens=3_072,
+                    diagnostic_label="final-explanation",
                 )
             except Exception as exc:  # noqa: BLE001
-                global_warnings.append(f"final explanation failed: {type(exc).__name__}")
+                diagnostics.record_error("final-explanation", exc)
+                global_warnings.append(
+                    f"final explanation failed: {type(exc).__name__}: {str(exc)[:200]}"
+                )
 
         for section in preliminary_sections:
             section.summary = explanation.sectionSummaries.get(section.id, section.summary)
 
-        track_confidences = [structure.track.confidence, rhythm.confidence]
+        track_confidences = [
+            _confidence(structure.track.confidence),
+            _confidence(rhythm.confidence),
+        ]
         track_confidences.extend(
-            output.agreement for _, output in consensus_pairs if output.agreement > 0
+            _confidence(output.agreement, 0.0)
+            for _, output in consensus_pairs
+            if output.agreement > 0
         )
         result = AnalysisResult(
             track=TrackResult(
-                title=structure.track.title,
-                artist=structure.track.artist,
+                title=structure.track.title or source_label,
+                artist=structure.track.artist or "不明",
                 durationSeconds=round(duration, 3),
                 bpm=round(grid.bpm, 2),
                 timeSignature=grid.time_signature,
@@ -542,9 +727,15 @@ class AccuracyPipelineV2:
             uncertainRanges=all_uncertain,
         )
         invariant_errors = validate_invariants(result)
-        result.diagnostics = diagnostics.build(invariant_errors)
+        quality_errors = validate_quality(result)
+        combined_errors = invariant_errors + [f"quality:{item}" for item in quality_errors]
+        result.diagnostics = diagnostics.build(combined_errors)
         if invariant_errors:
             raise RuntimeError(
                 "Accuracy v2 invariant violation: " + ", ".join(invariant_errors)
+            )
+        if quality_errors:
+            raise RuntimeError(
+                "Accuracy v2 quality gate violation: " + ", ".join(quality_errors)
             )
         return result
