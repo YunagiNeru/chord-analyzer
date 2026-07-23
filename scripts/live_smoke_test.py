@@ -12,7 +12,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from music_agent import MusicCoordinatorAgent
-from music_agent.validators import validate_invariants
+from music_agent.validators import validate_invariants, validate_quality
 
 
 def main() -> int:
@@ -37,15 +37,40 @@ def main() -> int:
     os.environ.setdefault("MAX_RESOLVER_CALLS", "4")
 
     started = time.perf_counter()
-    result = MusicCoordinatorAgent().analyze_youtube(url=args.youtube_url)
+    try:
+        result = MusicCoordinatorAgent().analyze_youtube(url=args.youtube_url)
+    except Exception as exc:  # noqa: BLE001 - command boundary
+        elapsed = time.perf_counter() - started
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "elapsedSeconds": round(elapsed, 3),
+                    "errorType": type(exc).__name__,
+                    "message": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 10
+
     elapsed = time.perf_counter() - started
     invariant_errors = validate_invariants(result)
+    quality_errors = validate_quality(result)
     chord_count = sum(
         len(measure.chords)
         for section in result.sections
         for measure in section.measures
     )
+    known_chord_count = sum(
+        chord.symbol not in {"X", "N"}
+        for section in result.sections
+        for measure in section.measures
+        for chord in measure.chords
+    )
     summary = {
+        "status": "passed" if not invariant_errors and not quality_errors else "failed",
         "elapsedSeconds": round(elapsed, 3),
         "analysisVersion": result.analysisVersion,
         "title": result.track.title,
@@ -56,9 +81,11 @@ def main() -> int:
         "globalKey": result.track.globalKey,
         "sectionCount": len(result.sections),
         "chordCount": chord_count,
+        "knownChordCount": known_chord_count,
         "uncertainRangeCount": len(result.uncertainRanges),
         "unresolvedRangeCount": sum(not item.resolved for item in result.uncertainRanges),
         "invariantErrors": invariant_errors,
+        "qualityErrors": quality_errors,
         "diagnostics": result.diagnostics.model_dump() if result.diagnostics else None,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -71,10 +98,10 @@ def main() -> int:
 
     if invariant_errors:
         return 2
+    if quality_errors:
+        return 6
     if result.analysisVersion != "2.0":
         return 3
-    if not result.sections or chord_count == 0:
-        return 4
     if elapsed > 890.0:
         return 5
     return 0
