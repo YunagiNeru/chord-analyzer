@@ -75,7 +75,7 @@ def _normalise_suffix(raw: str) -> str:
     value = raw.strip().replace("−", "-").replace("♭", "b").replace("♯", "#")
     value = value.replace("Δ", "maj").replace("△", "maj").replace("ø", "m7-5")
     value = value.replace("°", "dim").replace("＋", "+")
-    value = value.replace("min", "m").replace("minor", "m")
+    value = value.replace("minor", "m").replace("min", "m")
     value = value.replace("major", "maj")
     value = re.sub(r"\s+", "", value)
     return value
@@ -133,22 +133,27 @@ def parse_chord(symbol: str | None) -> ParsedChord:
     elif lower.startswith("5"):
         quality = "power"
         lower = lower[1:]
-    elif lower.startswith("m") and not lower.startswith("maj"):
-        quality = "minor"
-        lower = lower[1:]
+    elif lower.startswith("maj7"):
+        quality = "major"
+        seventh = "major7"
+        lower = lower[4:]
     elif lower.startswith("maj"):
         quality = "major"
         lower = lower[3:]
+    elif lower.startswith("m"):
+        quality = "minor"
+        lower = lower[1:]
 
-    if lower.startswith("maj7"):
-        seventh = "major7"
-        lower = lower[4:]
-    elif lower.startswith("7"):
-        seventh = "minor7"
-        lower = lower[1:]
-    elif lower.startswith("6"):
-        extensions.append("6")
-        lower = lower[1:]
+    if seventh == "none":
+        if lower.startswith("maj7"):
+            seventh = "major7"
+            lower = lower[4:]
+        elif lower.startswith("7"):
+            seventh = "minor7"
+            lower = lower[1:]
+        elif lower.startswith("6"):
+            extensions.append("6")
+            lower = lower[1:]
 
     for token in ("13", "11", "9", "6"):
         if token in lower:
