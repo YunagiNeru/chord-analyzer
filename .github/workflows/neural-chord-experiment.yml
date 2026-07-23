@@ -1,0 +1,31 @@
+name: Neural chord experiment checks
+
+on:
+  push:
+    branches:
+      - feature/neural-chord-engine
+  pull_request:
+    paths:
+      - "experiments/neural_chord_engine/**"
+      - ".github/workflows/neural-chord-experiment.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  syntax-and-unit-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run isolated checks
+        run: |
+          chmod +x experiments/neural_chord_engine/check.sh
+          experiments/neural_chord_engine/check.sh
