@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-PROJECT_ID="${PROJECT_ID:-ai-dojo-two26hnd-5011}"
+PROJECT_ID="${PROJECT_ID:-ai-dojo-july}"
 REGION="${REGION:-us-central1}"
 SERVICE_NAME="${SERVICE_NAME:-music-chord-analyzer}"
 RUNTIME_SA_NAME="${RUNTIME_SA_NAME:-music-chord-analyzer-sa}"
-MODEL_NAME="${MODEL_NAME:-gemini-2.5-flash}"
+MODEL_NAME="${MODEL_NAME:-gemini-3.5-flash}"
+RESOLVER_MODEL_NAME="${RESOLVER_MODEL_NAME:-$MODEL_NAME}"
+ANALYSIS_PIPELINE="${ANALYSIS_PIPELINE:-v2}"
+YOUTUBE_SECRET_NAME="${YOUTUBE_SECRET_NAME:-chord-analyzer-youtube-api-key}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "$SCRIPT_DIR"
@@ -14,10 +17,10 @@ test -f Dockerfile || { echo "ERROR: $SCRIPT_DIR に Dockerfile がありませ�
 test -f main.py || { echo "ERROR: $SCRIPT_DIR に main.py がありません。" >&2; exit 1; }
 test -f static/index.html || { echo "ERROR: $SCRIPT_DIR に static/index.html がありません。" >&2; exit 1; }
 
-echo "[1/8] Google Cloudプロジェクトを設定します: $PROJECT_ID"
+echo "[1/9] Google Cloudプロジェクトを設定します: $PROJECT_ID"
 gcloud config set project "$PROJECT_ID" >/dev/null
 
-echo "[2/8] 必要なAPIを有効化します。"
+echo "[2/9] 必要なAPIを有効化します。"
 gcloud services enable \
   run.googleapis.com \
   cloudbuild.googleapis.com \
@@ -25,36 +28,55 @@ gcloud services enable \
   aiplatform.googleapis.com \
   iam.googleapis.com \
   compute.googleapis.com \
+  secretmanager.googleapis.com \
   --project="$PROJECT_ID"
 
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 RUNTIME_SA="${RUNTIME_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 BUILD_SA="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-echo "[3/8] Cloud Run用サービスアカウントを確認します: $RUNTIME_SA"
+echo "[3/9] Cloud Run用サービスアカウントを確認します: $RUNTIME_SA"
 if ! gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$RUNTIME_SA_NAME" \
     --project="$PROJECT_ID" \
     --display-name="Music Chord Analyzer Cloud Run"
 fi
 
-echo "[4/8] Cloud Run実行サービスアカウントへVertex AI権限を付与します。"
+echo "[4/9] Cloud Run実行サービスアカウントへVertex AI権限を付与します。"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${RUNTIME_SA}" \
   --role="roles/aiplatform.user" \
   --condition=None \
   >/dev/null
 
-echo "[5/8] デプロイ実行者へサービスアカウント使用権限を付与します。"
+echo "[5/9] YouTube Data APIキーSecretを任意設定します。"
+SECRET_ARGS=()
+if gcloud secrets describe "$YOUTUBE_SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud secrets add-iam-policy-binding "$YOUTUBE_SECRET_NAME" \
+    --project="$PROJECT_ID" \
+    --member="serviceAccount:${RUNTIME_SA}" \
+    --role="roles/secretmanager.secretAccessor" \
+    >/dev/null
+  SECRET_ARGS+=("--set-secrets=YOUTUBE_API_KEY=${YOUTUBE_SECRET_NAME}:latest")
+  echo "YouTube metadata secret enabled: $YOUTUBE_SECRET_NAME"
+else
+  echo "INFO: $YOUTUBE_SECRET_NAME は未作成です。oEmbedとモデル推定へフォールバックします。"
+fi
+
+echo "[6/9] デプロイ実行者へサービスアカウント使用権限を付与します。"
 DEPLOYER_ACCOUNT="$(gcloud config get-value account 2>/dev/null)"
 if [[ "$DEPLOYER_ACCOUNT" == *.gserviceaccount.com ]]; then
   DEPLOYER_MEMBER="serviceAccount:${DEPLOYER_ACCOUNT}"
 else
   DEPLOYER_MEMBER="user:${DEPLOYER_ACCOUNT}"
 fi
-gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA"   --project="$PROJECT_ID"   --member="$DEPLOYER_MEMBER"   --role="roles/iam.serviceAccountUser"   >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --project="$PROJECT_ID" \
+  --member="$DEPLOYER_MEMBER" \
+  --role="roles/iam.serviceAccountUser" \
+  >/dev/null
 
-echo "[6/8] Cloud Build用サービスアカウントを確認します。"
+echo "[7/9] Cloud Build用サービスアカウントを確認します。"
 if gcloud iam service-accounts describe "$BUILD_SA" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${BUILD_SA}" \
@@ -62,11 +84,10 @@ if gcloud iam service-accounts describe "$BUILD_SA" --project="$PROJECT_ID" >/de
     --condition=None \
     >/dev/null
 else
-  echo "WARNING: $BUILD_SA がまだ作成されていないため、roles/run.builder の明示付与を省略します。"
-  echo "         source deployで権限エラーになった場合は、CLOUD_SHELL_DEPLOY.mdの対処を実行してください。"
+  echo "WARNING: $BUILD_SA が未作成のため roles/run.builder の明示付与を省略します。"
 fi
 
-echo "[7/8] Cloud Runへ独立サービスとしてデプロイします。"
+echo "[8/9] Cloud Runへデプロイします。"
 gcloud run deploy "$SERVICE_NAME" \
   --source=. \
   --project="$PROJECT_ID" \
@@ -78,14 +99,15 @@ gcloud run deploy "$SERVICE_NAME" \
   --service-account="$RUNTIME_SA" \
   --cpu=2 \
   --memory=4Gi \
-  --concurrency=2 \
+  --concurrency=1 \
   --timeout=900s \
   --min-instances=0 \
   --max-instances=3 \
-  --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=${MODEL_NAME},LOG_LEVEL=INFO" \
+  --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=global,GEMINI_MODEL=${MODEL_NAME},GEMINI_RESOLVER_MODEL=${RESOLVER_MODEL_NAME},ANALYSIS_PIPELINE=${ANALYSIS_PIPELINE},MODEL_MAX_PARALLEL_CALLS=4,MAX_RESOLVER_CALLS=4,ENABLE_REFERENCE_RESEARCH=1,LOG_LEVEL=INFO" \
+  "${SECRET_ARGS[@]}" \
   --quiet
 
-echo "[8/8] デプロイ結果を確認します。"
+echo "[9/9] デプロイ結果を確認します。"
 SERVICE_URL="$(gcloud run services describe "$SERVICE_NAME" \
   --project="$PROJECT_ID" \
   --region="$REGION" \
