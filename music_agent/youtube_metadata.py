@@ -38,7 +38,11 @@ def extract_video_id(url: str) -> str:
     elif host.endswith("youtube.com"):
         if parsed.path == "/watch":
             candidate = parse_qs(parsed.query).get("v", [""])[0]
-        elif parsed.path.startswith("/shorts/") or parsed.path.startswith("/embed/") or parsed.path.startswith("/live/"):
+        elif (
+            parsed.path.startswith("/shorts/")
+            or parsed.path.startswith("/embed/")
+            or parsed.path.startswith("/live/")
+        ):
             pieces = parsed.path.strip("/").split("/")
             candidate = pieces[1] if len(pieces) > 1 else ""
     if not VIDEO_ID_RE.fullmatch(candidate):
@@ -70,41 +74,49 @@ def resolve_youtube_metadata(
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
     result = YouTubeMetadata(video_id=video_id, canonical_url=canonical_url)
 
-    with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
-        if api_key:
+    try:
+        with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
+            if api_key:
+                response = client.get(
+                    "https://www.googleapis.com/youtube/v3/videos",
+                    params={
+                        "part": "snippet,contentDetails,status",
+                        "id": video_id,
+                        "key": api_key,
+                    },
+                )
+                if response.status_code == 200:
+                    payload = response.json()
+                    items = payload.get("items") or []
+                    if items:
+                        item = items[0]
+                        snippet = item.get("snippet") or {}
+                        content = item.get("contentDetails") or {}
+                        status = item.get("status") or {}
+                        result.title = snippet.get("title")
+                        result.channel_title = snippet.get("channelTitle")
+                        result.duration_seconds = parse_iso8601_duration(
+                            content.get("duration")
+                        )
+                        result.embeddable = status.get("embeddable")
+                        result.privacy_status = status.get("privacyStatus")
+                        result.live_broadcast_content = snippet.get(
+                            "liveBroadcastContent"
+                        )
+                        result.metadata_source = "youtube-data-api"
+                        return result
+
             response = client.get(
-                "https://www.googleapis.com/youtube/v3/videos",
-                params={
-                    "part": "snippet,contentDetails,status",
-                    "id": video_id,
-                    "key": api_key,
-                },
+                "https://www.youtube.com/oembed",
+                params={"url": canonical_url, "format": "json"},
             )
             if response.status_code == 200:
                 payload = response.json()
-                items = payload.get("items") or []
-                if items:
-                    item = items[0]
-                    snippet = item.get("snippet") or {}
-                    content = item.get("contentDetails") or {}
-                    status = item.get("status") or {}
-                    result.title = snippet.get("title")
-                    result.channel_title = snippet.get("channelTitle")
-                    result.duration_seconds = parse_iso8601_duration(content.get("duration"))
-                    result.embeddable = status.get("embeddable")
-                    result.privacy_status = status.get("privacyStatus")
-                    result.live_broadcast_content = snippet.get("liveBroadcastContent")
-                    result.metadata_source = "youtube-data-api"
-                    return result
-
-        # oEmbed is intentionally metadata-only. It does not retrieve media.
-        response = client.get(
-            "https://www.youtube.com/oembed",
-            params={"url": canonical_url, "format": "json"},
-        )
-        if response.status_code == 200:
-            payload = response.json()
-            result.title = payload.get("title")
-            result.channel_title = payload.get("author_name")
-            result.metadata_source = "youtube-oembed"
+                result.title = payload.get("title")
+                result.channel_title = payload.get("author_name")
+                result.metadata_source = "youtube-oembed"
+    except (httpx.HTTPError, ValueError):
+        # Metadata improves precision but must never block the official Gemini
+        # YouTube URL analysis path.
+        return result
     return result
