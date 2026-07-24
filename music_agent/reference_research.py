@@ -33,19 +33,13 @@ class ReferenceResearchResult:
     def primary_bpm(self) -> float | None:
         if not self.bpm_candidates:
             return None
-        ranked = sorted(
+        return sorted(
             self.bpm_candidates,
             key=lambda value: (
                 -self.bpm_support.get(value, 0),
                 value,
             ),
-        )
-        candidate = ranked[0]
-        support = self.bpm_support.get(candidate, 0)
-        # A single ungrounded mention is not strong enough to override audio.
-        if support >= 2 or (support >= 1 and len(self.sources) >= 2):
-            return candidate
-        return None
+        )[0]
 
 
 def _extract_bpms(text: str) -> tuple[list[float], dict[float, int]]:
@@ -53,8 +47,6 @@ def _extract_bpms(text: str) -> tuple[list[float], dict[float, int]]:
     for pattern in BPM_PATTERNS:
         values.extend(float(value) for value in pattern.findall(text))
 
-    # Nearby values from different catalogues are treated as one tempo family.
-    # This preserves 167/170 as separate evidence but ranks the denser cluster.
     counter = Counter(values)
     candidates = sorted(counter)
     support: dict[float, int] = {}
@@ -97,17 +89,26 @@ def research_references(
                     )
                 )
 
-    bpm_candidates, bpm_support = _extract_bpms(text)
+    raw_bpm_candidates, bpm_support = _extract_bpms(text)
+    # The pipeline treats returned values as grounded evidence. Do not expose a
+    # single unsupported mention as a candidate; it would be indistinguishable
+    # from hallucinated search prose downstream.
+    bpm_candidates = [
+        value
+        for value in raw_bpm_candidates
+        if bpm_support.get(value, 0) >= 2
+        or (bpm_support.get(value, 0) >= 1 and len(sources) >= 2)
+    ]
     key_candidates = list(
         dict.fromkeys(match.strip() for match in KEY_RE.findall(text))
     )[:8]
     facts: list[str] = []
-    if bpm_candidates:
+    if raw_bpm_candidates:
         facts.append(
             "BPM候補: "
             + ", ".join(
                 f"{value:g}(support={bpm_support.get(value, 0)})"
-                for value in bpm_candidates
+                for value in raw_bpm_candidates
             )
         )
     if key_candidates:
