@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -16,7 +17,7 @@ from music_agent import MusicCoordinatorAgent
 from music_agent.validators import validate_invariants, validate_quality
 
 
-def _chords(result) -> list:
+def _display_chords(result) -> list:
     return [
         chord
         for section in result.sections
@@ -25,21 +26,80 @@ def _chords(result) -> list:
     ]
 
 
+def _chord_state_count(result) -> int:
+    count = 0
+    previous: tuple[str, float] | None = None
+    for section in result.sections:
+        for measure in section.measures:
+            for chord in measure.chords:
+                identity = (chord.symbol, chord.startSeconds)
+                if previous != identity:
+                    count += 1
+                previous = identity
+    diagnostics = result.diagnostics
+    if diagnostics and diagnostics.chordStateCount:
+        return diagnostics.chordStateCount
+    return count
+
+
 def _rejected_path(output: Path) -> Path:
     suffix = output.suffix or ".json"
     return output.with_name(f"{output.stem}.rejected{suffix}")
 
 
+def _boundary_distance_beats(result, seconds: float) -> float:
+    bpm = result.track.bpm or 120.0
+    beat_duration = 60.0 / bpm
+    offset = result.downbeatOffsetSeconds or 0.0
+    phase = ((seconds - offset) / beat_duration) % 1.0
+    return min(phase, 1.0 - phase)
+
+
+def _maximum_section_bars(result) -> float:
+    bpm = result.track.bpm or 120.0
+    signature = str(result.track.timeSignature or "4/4")
+    try:
+        beats = int(signature.split("/", 1)[0])
+    except (TypeError, ValueError):
+        beats = 4
+    bar_duration = (60.0 / bpm) * max(1, beats)
+    return max(
+        (
+            (section.endSeconds - section.startSeconds) / bar_duration
+            for section in result.sections
+        ),
+        default=0.0,
+    )
+
+
 def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]:
     invariant_errors = validate_invariants(result)
     quality_errors = validate_quality(result)
-    chords = _chords(result)
-    known_chords = [chord for chord in chords if chord.symbol not in {"X", "N"}]
+    display_chords = _display_chords(result)
+    known_chords = [chord for chord in display_chords if chord.symbol not in {"X", "N"}]
     unresolved = [item for item in result.uncertainRanges if not item.resolved]
     unresolved_coverage = sum(
         item.endSeconds - item.startSeconds
         for item in unresolved
     )
+    diagnostics = result.diagnostics
+    required_failures = diagnostics.requiredModelFailures if diagnostics else []
+    section_starts = [
+        section.startSeconds
+        for section in result.sections
+        if section.startSeconds > 0.035
+    ]
+    maximum_boundary_error = max(
+        (_boundary_distance_beats(result, value) for value in section_starts),
+        default=0.0,
+    )
+    merged_sections = [
+        section.id
+        for section in result.sections
+        if "+" in section.id
+        or "〜" in section.name
+        or "セクション数上限" in section.summary
+    ]
     return {
         "status": status,
         "elapsedSeconds": round(elapsed, 3),
@@ -51,8 +111,12 @@ def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]
         "timeSignature": result.track.timeSignature,
         "globalKey": result.track.globalKey,
         "sectionCount": len(result.sections),
-        "chordCount": len(chords),
-        "knownChordCount": len(known_chords),
+        "mergedSections": merged_sections,
+        "maximumSectionBars": round(_maximum_section_bars(result), 4),
+        "maximumBoundaryErrorBeats": round(maximum_boundary_error, 6),
+        "chordStateCount": _chord_state_count(result),
+        "displayChordEventCount": len(display_chords),
+        "knownDisplayChordEventCount": len(known_chords),
         "uncertainRangeCount": len(result.uncertainRanges),
         "unresolvedRangeCount": len(unresolved),
         "unresolvedCoverageSeconds": round(unresolved_coverage, 3),
@@ -66,9 +130,10 @@ def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]
                 for item in unresolved
             }
         ),
+        "requiredModelFailures": required_failures,
         "invariantErrors": invariant_errors,
         "qualityErrors": quality_errors,
-        "diagnostics": result.diagnostics.model_dump() if result.diagnostics else None,
+        "diagnostics": diagnostics.model_dump() if diagnostics else None,
     }
 
 
@@ -148,13 +213,15 @@ def main() -> int:
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     print(f"RESULT={args.output.resolve()}")
 
+    if summary["requiredModelFailures"]:
+        return 7
     if summary["invariantErrors"]:
         return 2
     if summary["qualityErrors"]:
         return 6
     if result.analysisVersion != "2.0":
         return 3
-    if elapsed > 890.0:
+    if not math.isfinite(elapsed) or elapsed > 890.0:
         return 5
     return 0
 
