@@ -7,12 +7,39 @@ from typing import Any, TypeVar
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .diagnostics import DiagnosticsRecorder
 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+class _VertexCompactChordDraft(BaseModel):
+    """Vertex-facing equivalent without nested array-length constraints."""
+
+    symbol: str = "X"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    confidence: float = 0.5
+    alternatives: list[str] = Field(default_factory=list)
+
+
+class _VertexCompactSpecialistDraft(BaseModel):
+    """Request schema accepted by Vertex structured output conversion.
+
+    The canonical CompactSpecialistDraft retains deterministic limits after the
+    response is received. Sending nested maxItems constraints caused every
+    specialist request to fail with HTTP 400 INVALID_ARGUMENT on Vertex AI.
+    """
+
+    chords: list[_VertexCompactChordDraft] = Field(default_factory=list)
+    repeatedPattern: list[str] = Field(default_factory=list)
+
+
+_REQUEST_SCHEMA_OVERRIDES: dict[str, type[BaseModel]] = {
+    "CompactSpecialistDraft": _VertexCompactSpecialistDraft,
+}
 
 
 class ModelGateway:
@@ -51,6 +78,8 @@ class ModelGateway:
         parsed = response.parsed
         if isinstance(parsed, schema):
             return parsed
+        if isinstance(parsed, BaseModel):
+            parsed = parsed.model_dump()
         if parsed is not None:
             return schema.model_validate(parsed)
         if not response.text:
@@ -62,16 +91,23 @@ class ModelGateway:
         return schema.model_validate(payload)
 
     @staticmethod
+    def _request_schema(schema: type[SchemaT]) -> type[BaseModel]:
+        return _REQUEST_SCHEMA_OVERRIDES.get(schema.__name__, schema)
+
+    @staticmethod
     def _effective_max_output_tokens(
         schema: type[BaseModel],
         requested: int,
     ) -> int:
-        # These schemas are small, but verbose reasoning inside string fields has
-        # caused EOF-truncated JSON. More room plus an explicit compact retry is
-        # cheaper than losing the entire model call.
+        # Gemini 3.5 may consume part of max_output_tokens before emitting the
+        # structured JSON. Tiny visible responses can therefore still end at EOF
+        # when the budget is only 512 tokens.
         minimums = {
+            "CompactSpecialistDraft": 4_096,
+            "CompactResolutionDraft": 4_096,
             "ResolutionDraft": 4_096,
-            "FinalExplanationDraft": 4_096,
+            "StructureRefinementDraft": 6_144,
+            "FinalExplanationDraft": 8_192,
         }
         return max(requested, minimums.get(schema.__name__, requested))
 
@@ -88,6 +124,7 @@ class ModelGateway:
     ) -> SchemaT:
         last_error: Exception | None = None
         base_contents = list(contents)
+        request_schema = self._request_schema(schema)
         effective_max_tokens = self._effective_max_output_tokens(
             schema,
             max_output_tokens,
@@ -109,7 +146,7 @@ class ModelGateway:
                         config=types.GenerateContentConfig(
                             system_instruction=system_instruction,
                             response_mime_type="application/json",
-                            response_schema=schema,
+                            response_schema=request_schema,
                             temperature=temperature,
                             max_output_tokens=effective_max_tokens,
                         ),
