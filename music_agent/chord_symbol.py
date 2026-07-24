@@ -73,7 +73,19 @@ def _normalise_suffix(raw: str) -> str:
     value = value.replace("°", "dim").replace("＋", "+")
     value = value.replace("minor", "m").replace("min", "m")
     value = value.replace("major", "maj")
-    return re.sub(r"\s+", "", value)
+    value = re.sub(r"\s+", "", value)
+
+    # Model output sometimes concatenates seventh and extension degrees as
+    # `maj79` or `79b9`. Convert those into standard compact notation before
+    # parsing so the UI never receives malformed symbols such as Emaj79.
+    value = re.sub(r"(?i)^maj7(?:add)?13", "maj13", value)
+    value = re.sub(r"(?i)^maj7(?:add)?11", "maj11", value)
+    value = re.sub(r"(?i)^maj7(?:add)?9", "maj9", value)
+    value = re.sub(r"(?i)^7(?:add)?13", "13", value)
+    value = re.sub(r"(?i)^7(?:add)?11", "11", value)
+    value = re.sub(r"(?i)^79(?=[b#]9)", "7", value)
+    value = re.sub(r"(?i)^79$", "9", value)
+    return value
 
 
 def parse_chord(symbol: str | None) -> ParsedChord:
