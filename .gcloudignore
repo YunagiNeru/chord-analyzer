@@ -1,0 +1,32 @@
+# Git and editor metadata
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Local Python environments and caches
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local analysis outputs and temporary files
+accuracy-artifacts
+*.log
+*.tmp
+.DS_Store
+
+# Development-only test sources are run before deployment and omitted from image
+# to keep the Cloud Build context and final image smaller.
+tests
+
+# Local secrets and environment files
+.env
+.env.*
+*.pem
+*.key
