@@ -113,9 +113,32 @@ class AccuracyV2FinalizationTests(unittest.TestCase):
     def test_tempo_segment_is_normalized_to_selected_grid_and_duration(self) -> None:
         track = self.fixture["track"]
         source_segment = self.fixture["tempoSegments"][0]
+        dummy_chord = ChordEvent(
+            symbol="N",
+            startSeconds=0.0,
+            endSeconds=190.0,
+            confidence=1.0,
+            source="ai",
+        )
         result = AnalysisResult(
             track=TrackResult(**track),
-            sections=[],
+            sections=[
+                SectionResult(
+                    id="whole",
+                    name="whole",
+                    type="other",
+                    startSeconds=0.0,
+                    endSeconds=190.0,
+                    measures=[
+                        Measure(
+                            bar=1,
+                            startSeconds=0.0,
+                            endSeconds=190.0,
+                            chords=[dummy_chord],
+                        )
+                    ],
+                )
+            ],
             sourceType="youtube",
             sourceLabel="fixture",
             analysisMethod="ai_only",
@@ -184,7 +207,14 @@ class AccuracyV2FinalizationTests(unittest.TestCase):
         self.assertEqual((result.sections[0].key, result.sections[0].mode), ("F#", "minor"))
         self.assertEqual((result.sections[1].key, result.sections[1].mode), ("G#", "minor"))
         self.assertNotEqual(result.track.globalKey, "Ab")
-        self.assertTrue(all(chord.roman for section in result.sections for measure in section.measures for chord in measure.chords))
+        self.assertTrue(
+            all(
+                chord.roman
+                for section in result.sections
+                for measure in section.measures
+                for chord in measure.chords
+            )
+        )
 
     def test_generic_equal_split_is_not_accepted_as_semantic_structure(self) -> None:
         parent = SectionStructureDraft(
