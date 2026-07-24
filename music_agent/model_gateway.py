@@ -61,6 +61,20 @@ class ModelGateway:
             return schema.model_validate_json(response.text)
         return schema.model_validate(payload)
 
+    @staticmethod
+    def _effective_max_output_tokens(
+        schema: type[BaseModel],
+        requested: int,
+    ) -> int:
+        # These schemas are small, but verbose reasoning inside string fields has
+        # caused EOF-truncated JSON. More room plus an explicit compact retry is
+        # cheaper than losing the entire model call.
+        minimums = {
+            "ResolutionDraft": 4_096,
+            "FinalExplanationDraft": 4_096,
+        }
+        return max(requested, minimums.get(schema.__name__, requested))
+
     def generate_typed(
         self,
         *,
@@ -74,13 +88,18 @@ class ModelGateway:
     ) -> SchemaT:
         last_error: Exception | None = None
         base_contents = list(contents)
+        effective_max_tokens = self._effective_max_output_tokens(
+            schema,
+            max_output_tokens,
+        )
         for attempt in range(max(1, retries)):
             request_contents = list(base_contents)
             if attempt:
                 request_contents.append(
-                    "前回の出力はJSONスキーマ検証に失敗しました。"
-                    "必須フィールドの型を守り、数値は有限値、配列は配列、"
-                    "不明値は推測せず既定値または空配列で返してください。"
+                    "前回の出力はJSONスキーマ検証に失敗または途中終了しました。"
+                    "説明文を最小限にし、文字列を短くし、必須フィールドだけを含む"
+                    "完全に閉じたJSONを返してください。"
+                    "数値は有限値、配列は配列、不明値は空配列または既定値にしてください。"
                 )
             try:
                 with self._semaphore:
@@ -92,7 +111,7 @@ class ModelGateway:
                             response_mime_type="application/json",
                             response_schema=schema,
                             temperature=temperature,
-                            max_output_tokens=max_output_tokens,
+                            max_output_tokens=effective_max_tokens,
                         ),
                     )
                 input_tokens, output_tokens = self._usage(response)
