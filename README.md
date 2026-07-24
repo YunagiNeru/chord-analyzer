@@ -46,7 +46,8 @@
 - 最大インスタンス数: `2`
 - Google Search補助調査: 既定で無効
 - 構造・時間軸・既知コードカバー率が破綻した結果は拒否
-- Resolverの一時障害だけが残る場合は、未確定率と候補を明示した下書き結果を返却
+- Resolverの一時障害だけが残り、未確定率が40%以下の場合は、候補と警告を保持した下書き結果を返却
+- 未確定率が40%を超える結果は本番モードでも拒否
 
 本番モードでも、コード譜を確定譜として断定しません。UIは信頼度、候補、警告を表示し、利用者が音源と照合できる設計です。
 
@@ -82,6 +83,7 @@
 | `MAX_RESOLVER_RECOVERY_CALLS` | `12` | 失敗バッチの小分け回復上限。デプロイ時は`16` |
 | `ENABLE_REFERENCE_RESEARCH` | `1` | Google Search補助調査。デプロイ時は`0` |
 | `STRICT_QUALITY_GATE` | `1` | `0`では安全な部分結果を警告付きで返す |
+| `MAX_DEGRADED_UNRESOLVED_RATIO` | `0.40` | 本番で返却可能な未確定率の上限 |
 | `YOUTUBE_API_KEY` | 未設定 | YouTube Data APIによる正式メタデータ取得 |
 | `LOG_LEVEL` | `INFO` | ログレベル |
 
@@ -93,15 +95,17 @@ python -m unittest discover -s tests -v
 bash -n deploy.sh
 ```
 
-`deploy.sh` はデプロイ前に同じコンパイルと全テストを実行します。再デプロイ時にテストを省略する場合だけ、明示的に `RUN_LOCAL_TESTS=0` を指定します。
+`deploy.sh` はデプロイ前に厳格品質ゲートで同じコンパイルと全テストを実行します。再デプロイ時にテストを省略する場合だけ、明示的に `RUN_LOCAL_TESTS=0` を指定します。
 
 ## Cloud Runデプロイ
 
 ```bash
 cd ~/chord-analyzer
 git pull --ff-only origin feature/accuracy-v2
-source "$HOME/.venvs/chord-analyzer/bin/activate"
-PROJECT_ID=ai-dojo-july REGION=us-central1 ./deploy.sh
+PROJECT_ID=ai-dojo-july \
+REGION=us-central1 \
+PYTHON_BIN="$HOME/.venvs/chord-analyzer/bin/python" \
+./deploy.sh
 ```
 
 成功時は最後に次を表示します。
