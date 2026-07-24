@@ -1,47 +1,64 @@
 # Music Chord Analyzer
 
-YouTube URL、音声ファイル、直接音声URLから楽曲構造・BPM・キー・コード進行を解析するCloud Runアプリです。
+`ai-dojo-two26hnd-5011` の Cloud Run へ独立サービスとしてデプロイする、楽曲構成・コード進行分析アプリです。
+
+## 主な機能
+
+- 単一の `static/index.html` によるレスポンシブWeb UI
+- YouTube URLのGemini直接解析
+- MP3 / WAV / FLAC / AAC / M4A / AIFF / OGG / OPUS / WebMアップロード
+- 公開された直接音声URLの取得と解析（SSRF対策あり）
+- `librosa` DSPとGeminiを統合したBPM・キー・コード・セクション推定
+- 構成分析、和声分析、理論監査を分担するサブエージェント構成
+- 範囲選択タイムライン、選択範囲再生、セクション境界スナップ
+- 小節・拍・コード・度数を示すコード譜
+- ライト／ダーク／システムテーマ
+- 分析結果だけで答える質問エージェントと、必要時だけGoogle Searchを使う調査エージェント
+- プレーンテキスト、Markdown、選択範囲JSON、解析全体JSONのコピー
 
 ## Accuracy V2
 
-既定の `ANALYSIS_PIPELINE=v2` では、単一の全曲コード生成を廃止し、次の処理を行います。
+`ANALYSIS_PIPELINE=v2` では、YouTube音声を外部ダウンロードせず、Vertex AIのYouTube URL入力を使用します。
 
-1. YouTube公式メタデータまたはoEmbedによるソース確定
-2. 全体構造分析とリズム／ダウンビート分析を独立実行
-3. BPM半分・標準・2倍とダウンビート位置の決定的なグリッド選択
-4. セクションごとのクリップ解析
-5. ルート／品質、ベース／テンション、変更拍／反復の3専門分析
-6. 候補合議と時系列最適化
-7. 低一致度範囲だけの候補制約付き再解析
-8. Pythonによる範囲、小節、拍、重複、終了時刻の完全性検査
-9. 確定コードを変更しない説明生成
+- 全体構造とリズムを独立解析
+- 全体構造が不十分な場合は重複する時間窓で再解析
+- セクションごとにルート／基本品質、ベース／拡張音、変更拍／反復を独立解析
+- 候補列を時系列最適化してコード譜へ統合
+- 信頼度は代替候補を独立票として数えず、各専門分析の一次回答から算出
+- `C`、`Cmaj7`、`C/E` のようにルートと基本品質が一致する差は重大な未解決範囲へ誤分類しない
+- ルートまたはmajor/minor等の基本品質が不一致の場合だけ局所再解析
+- セクション数、コード密度、既知コードの時間カバー率、未解決範囲率を品質ゲートで検査
+- 品質ゲート未達の解析を正常結果として返さない
 
-YouTube動画はGeminiへ公式URLを直接渡します。yt-dlp、Cookie、YouTube音声のサーバーダウンロードは使用しません。
+## 入力対応
 
-## 入力
-
-| 入力 | 処理 |
+| 入力 | 動作 |
 |---|---|
-| YouTube URL | GeminiのYouTube URL入力とVideoMetadataによる区間解析 |
-| 音声ファイル | FFmpeg変換、改善DSP、Gemini区間解析、合議 |
-| 直接音声URL | SSRF対策後に一時取得し、音声ファイルと同じ処理 |
-| Spotify / Apple Music | YouTube URLまたは権利を持つ音声ファイルを案内 |
+| YouTube URL | GeminiへURLを直接渡して解析 |
+| 音声ファイル | FFmpeg変換 → DSP解析 → Gemini解析 |
+| 直接音声URL | 安全性検査後に一時取得し、アップロードと同じ方式で解析 |
+| Spotify URL | 音声を取得できないため、YouTube URLまたは音声ファイルを案内 |
+| Apple Music URL | 音声を取得できないため、YouTube URLまたは音声ファイルを案内 |
+
+## エージェント構成
+
+```text
+MusicCoordinatorAgent
+├── SourceInspectorAgent
+├── StructureAnalysisAgent
+├── HarmonyAnalysisAgent
+├── TheoryAuditAgent
+├── QuestionRouterAgent
+├── AnalysisQuestionAgent
+└── MusicResearchAgent
+```
 
 ## API
 
-- `GET /`
-- `GET /api/health`
-- `POST /api/analyze` — `source_url` または `audio_file`
+- `GET /` — Web UI
+- `GET /api/health` — ヘルスチェック
+- `POST /api/analyze` — `multipart/form-data` で `source_url` または `audio_file`
 - `POST /api/question` — 質問と解析JSON
-
-既存の `AnalysisResult` フィールドは維持し、V2では以下を追加します。
-
-- `tempoSegments`
-- `downbeatOffsetSeconds`
-- `referenceSources`
-- `uncertainRanges`
-- `diagnostics`
-- 各コード／セクションの `agreement`
 
 ## 環境変数
 
@@ -49,45 +66,22 @@ YouTube動画はGeminiへ公式URLを直接渡します。yt-dlp、Cookie、YouT
 |---|---|---|
 | `GOOGLE_CLOUD_PROJECT` | 必須 | Google CloudプロジェクトID |
 | `GOOGLE_CLOUD_LOCATION` | `global` | Vertex AIロケーション |
-| `GEMINI_MODEL` | `gemini-3.5-flash` | 基本分析モデル |
-| `GEMINI_RESOLVER_MODEL` | 基本モデルと同じ | 不一致解決モデル |
-| `ANALYSIS_PIPELINE` | `v2` | `v2` または明示的ロールバック用 `legacy` |
-| `MODEL_MAX_PARALLEL_CALLS` | `4` | 1リクエスト内の最大並列モデル呼び出し |
-| `MAX_RESOLVER_CALLS` | `4` | 低一致度区間の最大再解析数 |
-| `ENABLE_REFERENCE_RESEARCH` | `1` | Google Searchによる補助情報調査 |
-| `YOUTUBE_API_KEY` | 任意 | YouTube Data APIによる正式タイトル・再生時間取得 |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | 使用モデル |
+| `GEMINI_RESOLVER_MODEL` | `GEMINI_MODEL`と同じ | 不一致解決モデル |
+| `ANALYSIS_PIPELINE` | `v2` | `v2` または明示的ロールバック用の `legacy` |
+| `MODEL_MAX_PARALLEL_CALLS` | `4` | 同時モデル呼び出し上限 |
+| `MAX_RESOLVER_CALLS` | `4` | 局所不一致解決の最大回数 |
+| `ENABLE_REFERENCE_RESEARCH` | `1` | Google Search補助調査 |
+| `YOUTUBE_API_KEY` | 未設定 | YouTube Data APIによる正式メタデータ取得 |
+| `LOG_LEVEL` | `INFO` | ログレベル |
 
-## ローカル起動
+## 現在の上限
 
-```bash
-PROJECT_ID=ai-dojo-july bash local_run.sh
-```
-
-## テスト
-
-```bash
-python -m compileall -q main.py music_agent tests
-python -m unittest discover -s tests -v
-python -m pip check
-```
-
-## デプロイ
-
-```bash
-PROJECT_ID=ai-dojo-july bash deploy.sh
-```
-
-ステージングへ出す場合はサービス名だけ変更します。
-
-```bash
-PROJECT_ID=ai-dojo-july \
-SERVICE_NAME=music-chord-analyzer-v2-staging \
-bash deploy.sh
-```
-
-## 制限
-
-- 入力ファイル／直接音声URL: 30MiB以下
+- 入力ファイルまたは直接音声URL: 30 MiB以下
 - 音源長: 12分以下
-- Cloud Runタイムアウト: 900秒
-- 自動採譜のため、密集ボイシング、ライブアレンジ、意図的な曖昧和音では低信頼範囲が残る場合があります。その場合は `uncertainRanges` と `warnings` に明示します。
+- Geminiインライン音声: 14 MiB以下へFFmpegで変換
+- サーバー側へ音源・分析結果・質問履歴を永続保存しない
+
+## 注意
+
+コード、キー、BPM、セクション境界は自動推定です。複雑なテンション、転調、転回形、ミックスの密度が高い部分では誤認する場合があります。
