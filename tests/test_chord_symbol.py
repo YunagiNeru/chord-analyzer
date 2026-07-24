@@ -18,10 +18,10 @@ class ChordSymbolTests(unittest.TestCase):
         self.assertEqual(canonicalize_symbol("Csus"), "Csus4")
 
     def test_compound_extension_cleanup(self) -> None:
-        self.assertEqual(canonicalize_symbol("Emaj79"), "Emaj79")
+        self.assertEqual(canonicalize_symbol("Emaj79"), "Emaj9")
         self.assertEqual(parse_chord("Emaj79").extensions, ("9",))
         self.assertEqual(canonicalize_symbol("D#79b9"), "D#7b9")
-        self.assertEqual(canonicalize_symbol("C713"), "C713")
+        self.assertEqual(canonicalize_symbol("C713"), "C13")
 
     def test_components(self) -> None:
         parsed = parse_chord("Am7/E")
