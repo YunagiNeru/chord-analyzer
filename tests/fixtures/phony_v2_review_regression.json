@@ -1,0 +1,149 @@
+{
+  "track": {
+    "title": "フォニイ / phony - kafu [オリジナル]",
+    "artist": "ツミキ / NOMELON NOLEMON",
+    "durationSeconds": 190.0,
+    "bpm": 240.0,
+    "timeSignature": "4/4",
+    "globalKey": "G#",
+    "globalMode": "minor",
+    "confidence": 0.6684
+  },
+  "tempoSegments": [
+    {
+      "startSeconds": 0.0,
+      "endSeconds": 190.0,
+      "bpm": 120.0,
+      "confidence": 0.95
+    }
+  ],
+  "downbeatOffsetSeconds": 0.0,
+  "sections": [
+    {
+      "id": "intro1",
+      "name": "イントロ1",
+      "type": "intro",
+      "startSeconds": 0.0,
+      "endSeconds": 11.0,
+      "chords": [
+        {
+          "symbol": "E",
+          "startSeconds": 0.25,
+          "endSeconds": 3.5,
+          "bar": 1,
+          "beat": 2.0,
+          "confidence": 0.6488,
+          "agreement": 0.7258,
+          "alternatives": ["Emaj7", "G#m", "G#m7"]
+        },
+        {
+          "symbol": "F#",
+          "startSeconds": 3.5,
+          "endSeconds": 5.5,
+          "bar": 4,
+          "beat": 3.0,
+          "confidence": 0.7258,
+          "agreement": 0.7258,
+          "alternatives": ["E", "D#m7", "Em7"]
+        },
+        {
+          "symbol": "G#m",
+          "startSeconds": 5.5,
+          "endSeconds": 9.5,
+          "bar": 6,
+          "beat": 3.0,
+          "confidence": 0.85,
+          "agreement": 0.85,
+          "alternatives": ["D#m", "G#m7", "F#"]
+        }
+      ]
+    },
+    {
+      "id": "chorus1",
+      "name": "サビ1",
+      "type": "chorus",
+      "startSeconds": 61.0,
+      "endSeconds": 84.0,
+      "chords": [
+        {
+          "symbol": "E",
+          "startSeconds": 61.0,
+          "endSeconds": 62.0,
+          "bar": 62,
+          "beat": 1.0,
+          "confidence": 0.9248,
+          "agreement": 1.0,
+          "alternatives": ["Emaj7", "Em7"]
+        },
+        {
+          "symbol": "F#",
+          "startSeconds": 62.0,
+          "endSeconds": 63.0,
+          "bar": 63,
+          "beat": 1.0,
+          "confidence": 0.732,
+          "agreement": 0.732,
+          "alternatives": ["E", "F#7", "Em7"]
+        },
+        {
+          "symbol": "D#m",
+          "startSeconds": 63.0,
+          "endSeconds": 64.0,
+          "bar": 64,
+          "beat": 1.0,
+          "confidence": 0.4386,
+          "agreement": 0.4386,
+          "alternatives": ["D#7", "F#", "D#m7"]
+        },
+        {
+          "symbol": "G#m",
+          "startSeconds": 64.0,
+          "endSeconds": 65.0,
+          "bar": 65,
+          "beat": 1.0,
+          "confidence": 0.6568,
+          "agreement": 0.732,
+          "alternatives": ["G#m7", "F#", "F#7"]
+        }
+      ]
+    },
+    {
+      "id": "prechorus2+prechorus3",
+      "name": "Bメロ2〜Bメロ3",
+      "type": "pre_chorus",
+      "startSeconds": 107.0,
+      "endSeconds": 129.0,
+      "chords": [
+        {
+          "symbol": "E",
+          "startSeconds": 107.0,
+          "endSeconds": 109.0,
+          "bar": 108,
+          "beat": 1.0,
+          "confidence": 0.85,
+          "agreement": 0.85,
+          "alternatives": ["Emaj7", "Em7"]
+        }
+      ]
+    },
+    {
+      "id": "bridge+chorus2_quiet",
+      "name": "Cメロ〜落ちサビ",
+      "type": "bridge",
+      "startSeconds": 140.0,
+      "endSeconds": 160.0,
+      "chords": [
+        {
+          "symbol": "E",
+          "startSeconds": 140.0,
+          "endSeconds": 141.0,
+          "bar": 141,
+          "beat": 1.0,
+          "confidence": 0.447,
+          "agreement": 0.447,
+          "alternatives": ["B/F#", "G#m", "B"]
+        }
+      ]
+    }
+  ]
+}
