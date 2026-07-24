@@ -43,10 +43,9 @@ class DspSummary(ApiModel):
     waveform: list[float] = Field(default_factory=list)
 
 
-# The following draft models are model-facing contracts. They are deliberately
-# permissive: semantic range checks and canonicalisation happen in deterministic
-# Python after generation. This prevents one malformed model field from
-# discarding an otherwise useful response.
+# Model-facing contracts are deliberately permissive. Semantic validation,
+# canonicalisation, range clipping, and coverage checks happen in deterministic
+# Python so one malformed optional field cannot discard an otherwise useful run.
 class TrackStructureDraft(ApiModel):
     title: str = "不明な楽曲"
     artist: str = "不明"
@@ -74,6 +73,18 @@ class StructureDraft(ApiModel):
     track: TrackStructureDraft = Field(default_factory=TrackStructureDraft)
     sections: list[SectionStructureDraft] = Field(default_factory=list)
     observations: list[str] = Field(default_factory=list)
+
+
+class RefinedSectionDraft(ApiModel):
+    name: str = ""
+    type: str = "other"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    confidence: float = 0.5
+
+
+class StructureRefinementDraft(ApiModel):
+    sections: list[RefinedSectionDraft] = Field(default_factory=list, max_length=8)
 
 
 class TempoCandidate(ApiModel):
@@ -155,6 +166,21 @@ class SpecialistSectionDraft(ApiModel):
     observations: list[str] = Field(default_factory=list)
 
 
+class CompactChordDraft(ApiModel):
+    """Small role-neutral chord state returned by section specialists."""
+
+    symbol: str = "X"
+    startSeconds: float = 0.0
+    endSeconds: float = 0.0
+    confidence: float = 0.5
+    alternatives: list[str] = Field(default_factory=list, max_length=3)
+
+
+class CompactSpecialistDraft(ApiModel):
+    chords: list[CompactChordDraft] = Field(default_factory=list, max_length=96)
+    repeatedPattern: list[str] = Field(default_factory=list, max_length=16)
+
+
 ShortResolutionReason = Annotated[str, Field(max_length=60)]
 ShortObservation = Annotated[str, Field(max_length=100)]
 ShortWarning = Annotated[str, Field(max_length=180)]
@@ -172,6 +198,13 @@ class ResolutionChoice(ApiModel):
 class ResolutionDraft(ApiModel):
     choices: list[ResolutionChoice] = Field(default_factory=list, max_length=4)
     observations: list[ShortObservation] = Field(default_factory=list, max_length=2)
+
+
+class CompactResolutionDraft(ApiModel):
+    """Exactly one resolver decision; no free-form reason text."""
+
+    chosenSymbol: str = "X"
+    confidence: float = 0.5
 
 
 class FinalExplanationDraft(ApiModel):
@@ -304,8 +337,14 @@ class AnalysisDiagnostics(ApiModel):
     modelUsage: list[ModelUsage] = Field(default_factory=list)
     invariantErrors: list[str] = Field(default_factory=list)
     modelErrors: list[str] = Field(default_factory=list)
+    requiredModelFailures: list[str] = Field(default_factory=list)
     sectionSpecialistCalls: int = Field(default=0, ge=0)
     resolverCalls: int = Field(default=0, ge=0)
+    structureRefinementCalls: int = Field(default=0, ge=0)
+    analysisSliceCount: int = Field(default=0, ge=0)
+    chordStateCount: int = Field(default=0, ge=0)
+    displayChordEventCount: int = Field(default=0, ge=0)
+    boundaryAdjustments: int = Field(default=0, ge=0)
     gridScore: float | None = None
 
 
