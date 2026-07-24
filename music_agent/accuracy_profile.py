@@ -16,6 +16,9 @@ class AccuracyProfile:
     alternative_weight: float
     simple_triad_reinforcement: float
     uncertainty_threshold: float
+    minimum_primary_contributors: int
+    exact_agreement_weight: float
+    component_agreement_weight: float
     change_penalty: float
     isolated_penalty: float
     repeated_section_confidence_threshold: float
@@ -27,8 +30,15 @@ class AccuracyProfile:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "AccuracyProfile":
+        exact_weight = float(payload.get("exactAgreementWeight", 0.25))
+        component_weight = float(payload.get("componentAgreementWeight", 0.75))
+        total_agreement_weight = exact_weight + component_weight
+        if total_agreement_weight <= 0:
+            exact_weight = 0.25
+            component_weight = 0.75
+            total_agreement_weight = 1.0
         return cls(
-            version=int(payload.get("version", 1)),
+            version=int(payload.get("version", 2)),
             role_weights={
                 str(key): float(value)
                 for key, value in (payload.get("roleWeights") or {}).items()
@@ -37,6 +47,12 @@ class AccuracyProfile:
             alternative_weight=float(payload.get("alternativeWeight", 0.16)),
             simple_triad_reinforcement=float(payload.get("simpleTriadReinforcement", 0.22)),
             uncertainty_threshold=float(payload.get("uncertaintyThreshold", 0.58)),
+            minimum_primary_contributors=max(
+                1,
+                int(payload.get("minimumPrimaryContributors", 2)),
+            ),
+            exact_agreement_weight=exact_weight / total_agreement_weight,
+            component_agreement_weight=component_weight / total_agreement_weight,
             change_penalty=float(payload.get("changePenalty", 0.28)),
             isolated_penalty=float(payload.get("isolatedPenalty", 0.22)),
             repeated_section_confidence_threshold=float(
@@ -59,6 +75,9 @@ class AccuracyProfile:
             "alternativeWeight": self.alternative_weight,
             "simpleTriadReinforcement": self.simple_triad_reinforcement,
             "uncertaintyThreshold": self.uncertainty_threshold,
+            "minimumPrimaryContributors": self.minimum_primary_contributors,
+            "exactAgreementWeight": self.exact_agreement_weight,
+            "componentAgreementWeight": self.component_agreement_weight,
             "changePenalty": self.change_penalty,
             "isolatedPenalty": self.isolated_penalty,
             "repeatedSectionConfidenceThreshold": self.repeated_section_confidence_threshold,
