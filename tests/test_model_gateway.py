@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 from typing import Any
 
+from music_agent.accuracy_v2_finalization_v2 import BatchResolutionDraft
 from music_agent.model_gateway import ModelGateway
 from music_agent.schemas import (
     CompactResolutionDraft,
@@ -78,10 +79,31 @@ class ModelGatewayTests(unittest.TestCase):
         )
         self.assertEqual(
             ModelGateway._effective_max_output_tokens(
+                BatchResolutionDraft,
+                2_048,
+            ),
+            8_192,
+        )
+        self.assertEqual(
+            ModelGateway._effective_max_output_tokens(
                 FinalExplanationDraft,
                 3_072,
             ),
             8_192,
+        )
+
+    def test_resource_exhausted_is_treated_as_transient(self) -> None:
+        self.assertTrue(
+            ModelGateway._is_transient_error(
+                RuntimeError("429 RESOURCE_EXHAUSTED")
+            )
+        )
+
+    def test_eof_json_is_treated_as_truncated_output(self) -> None:
+        self.assertTrue(
+            ModelGateway._is_truncated_output(
+                RuntimeError("Invalid JSON: EOF while parsing a value")
+            )
         )
 
 
