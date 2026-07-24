@@ -38,8 +38,8 @@ COMMIT_SHORT="${COMMIT_SHA:0:12}"
 echo "[preflight] commit=$COMMIT_SHA"
 "$PYTHON_BIN" -m compileall -q main.py music_agent scripts tests
 if [[ "$RUN_LOCAL_TESTS" == "1" ]]; then
-  echo "[preflight] unit tests"
-  "$PYTHON_BIN" -m unittest discover -s tests -v
+  echo "[preflight] unit tests (strict quality gate)"
+  STRICT_QUALITY_GATE=1 "$PYTHON_BIN" -m unittest discover -s tests -v
 fi
 
 echo "[1/9] Google Cloudプロジェクトを設定します: $PROJECT_ID"
