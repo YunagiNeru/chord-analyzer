@@ -15,6 +15,7 @@ class ScriptEntrypointTests(unittest.TestCase):
             "scripts/live_smoke_test.py",
             "scripts/evaluate_accuracy.py",
             "scripts/tune_accuracy_profile.py",
+            "scripts/rebuild_review_snapshot.py",
         )
         for script in scripts:
             with self.subTest(script=script):
