@@ -13,6 +13,7 @@ class ScriptEntrypointTests(unittest.TestCase):
     def test_direct_script_help_commands_import_project_package(self) -> None:
         scripts = (
             "scripts/live_smoke_test.py",
+            "scripts/live_schema_probe.py",
             "scripts/evaluate_accuracy.py",
             "scripts/tune_accuracy_profile.py",
             "scripts/rebuild_review_snapshot.py",
