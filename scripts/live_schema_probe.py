@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -19,6 +20,14 @@ from music_agent.schemas import CompactResolutionDraft, CompactSpecialistDraft
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Probe the live Vertex AI structured-output contracts used by "
+            "Accuracy V2 specialists and resolvers."
+        )
+    )
+    parser.parse_args()
+
     project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
     if not project:
         raise SystemExit("GOOGLE_CLOUD_PROJECT is required")
