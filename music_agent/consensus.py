@@ -31,19 +31,78 @@ def _overlap(start: float, end: float, other_start: float, other_end: float) -> 
     return max(0.0, min(end, other_end) - max(start, other_start))
 
 
+def _distance_to_interval(
+    start: float,
+    end: float,
+    other_start: float,
+    other_end: float,
+) -> float:
+    if other_end < start:
+        return start - other_end
+    if other_start > end:
+        return other_start - end
+    return 0.0
+
+
 def _best_event(
     events: list[SpecialistChordDraft],
     start: float,
     end: float,
 ) -> SpecialistChordDraft | None:
-    candidates = [
-        (_overlap(start, end, item.startSeconds, item.endSeconds), item)
-        for item in events
-    ]
-    candidates = [item for item in candidates if item[0] > 0.0]
-    if not candidates:
+    """Select the specialist's state for one beat slot.
+
+    Model responses sometimes encode only chord-change events or leave small gaps
+    between adjacent intervals. A chord label is a state, so a non-empty
+    specialist sequence must continue across those gaps instead of disappearing
+    from the consensus denominator. Exact overlaps remain preferred; otherwise
+    the nearest labelled interval is used deterministically.
+    """
+
+    if not events:
         return None
-    return max(candidates, key=lambda item: (item[0], item[1].confidence))[1]
+
+    ordered = sorted(
+        events,
+        key=lambda item: (
+            item.startSeconds,
+            item.endSeconds,
+            item.symbol,
+        ),
+    )
+    overlapping = [
+        (_overlap(start, end, item.startSeconds, item.endSeconds), item)
+        for item in ordered
+    ]
+    overlapping = [item for item in overlapping if item[0] > 0.0]
+    if overlapping:
+        return max(
+            overlapping,
+            key=lambda item: (
+                item[0],
+                item[1].confidence,
+                -item[1].startSeconds,
+            ),
+        )[1]
+
+    slot_midpoint = (start + end) / 2.0
+    return min(
+        ordered,
+        key=lambda item: (
+            _distance_to_interval(
+                start,
+                end,
+                item.startSeconds,
+                item.endSeconds,
+            ),
+            abs(
+                slot_midpoint
+                - ((item.startSeconds + item.endSeconds) / 2.0)
+            ),
+            -item.confidence,
+            item.startSeconds,
+            item.symbol,
+        ),
+    )
 
 
 def _best_dsp_event(
