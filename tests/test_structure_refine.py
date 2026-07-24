@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from music_agent.beat_grid import BeatGrid
+from music_agent.consensus import consensus_section
 from music_agent.schemas import SectionStructureDraft, StructureRefinementDraft
 from music_agent.structure_refine import (
     align_sections_to_grid,
@@ -83,7 +84,44 @@ class StructureRefineTests(unittest.TestCase):
                 abs(section.startSeconds - value)
                 for value in self.grid.beat_times
             )
-            self.assertLess(distance, 0.002)
+            self.assertLess(distance, 1e-7)
+
+    def test_grid_aligned_boundary_does_not_create_zero_length_unknown_slot(self) -> None:
+        sections = [
+            SectionStructureDraft(
+                id="left",
+                name="左",
+                type="verse",
+                startSeconds=0.0,
+                endSeconds=50.0,
+            ),
+            SectionStructureDraft(
+                id="right",
+                name="右",
+                type="chorus",
+                startSeconds=50.0,
+                endSeconds=70.0,
+            ),
+        ]
+        aligned, _ = align_sections_to_grid(
+            sections,
+            grid=self.grid,
+            duration=70.0,
+        )
+
+        for section in aligned:
+            output = consensus_section(
+                section=section,
+                specialists=[],
+                grid=self.grid,
+            )
+            self.assertTrue(output.chords)
+            self.assertTrue(
+                all(chord.endSeconds > chord.startSeconds for chord in output.chords)
+            )
+            self.assertTrue(
+                all(item.endSeconds > item.startSeconds for item in output.uncertain_ranges)
+            )
 
     def test_oversized_chorus_is_deterministically_split(self) -> None:
         sections = [
