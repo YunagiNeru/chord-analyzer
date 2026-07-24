@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from google.genai import types
@@ -10,7 +11,10 @@ from .prompts import REFERENCE_ANALYSIS_SYSTEM_PROMPT, build_reference_prompt
 from .schemas import ReferenceSource
 
 
-BPM_RE = re.compile(r"(?<!\d)([4-9]\d|1\d\d|2[0-4]\d)\s*BPM\b", re.IGNORECASE)
+BPM_PATTERNS = (
+    re.compile(r"\bBPM\s*[=:：]?\s*([4-9]\d|1\d\d|2[0-9]\d|3[0-2]\d)\b", re.IGNORECASE),
+    re.compile(r"\b([4-9]\d|1\d\d|2[0-9]\d|3[0-2]\d)\s*BPM\b", re.IGNORECASE),
+)
 KEY_RE = re.compile(
     r"\b([A-G](?:#|b)?(?:\s*(?:major|minor|メジャー|マイナー)))\b",
     re.IGNORECASE,
@@ -23,6 +27,44 @@ class ReferenceResearchResult:
     sources: list[ReferenceSource] = field(default_factory=list)
     bpm_candidates: list[float] = field(default_factory=list)
     key_candidates: list[str] = field(default_factory=list)
+    bpm_support: dict[float, int] = field(default_factory=dict)
+
+    @property
+    def primary_bpm(self) -> float | None:
+        if not self.bpm_candidates:
+            return None
+        ranked = sorted(
+            self.bpm_candidates,
+            key=lambda value: (
+                -self.bpm_support.get(value, 0),
+                value,
+            ),
+        )
+        candidate = ranked[0]
+        support = self.bpm_support.get(candidate, 0)
+        # A single ungrounded mention is not strong enough to override audio.
+        if support >= 2 or (support >= 1 and len(self.sources) >= 2):
+            return candidate
+        return None
+
+
+def _extract_bpms(text: str) -> tuple[list[float], dict[float, int]]:
+    values: list[float] = []
+    for pattern in BPM_PATTERNS:
+        values.extend(float(value) for value in pattern.findall(text))
+
+    # Nearby values from different catalogues are treated as one tempo family.
+    # This preserves 167/170 as separate evidence but ranks the denser cluster.
+    counter = Counter(values)
+    candidates = sorted(counter)
+    support: dict[float, int] = {}
+    for candidate in candidates:
+        support[candidate] = sum(
+            count
+            for value, count in counter.items()
+            if abs(value - candidate) <= 1.5
+        )
+    return candidates[:8], support
 
 
 def research_references(
@@ -54,11 +96,29 @@ def research_references(
                         facts=[],
                     )
                 )
-    bpm_candidates = sorted({float(value) for value in BPM_RE.findall(text)})
-    key_candidates = list(dict.fromkeys(match.strip() for match in KEY_RE.findall(text)))
+
+    bpm_candidates, bpm_support = _extract_bpms(text)
+    key_candidates = list(
+        dict.fromkeys(match.strip() for match in KEY_RE.findall(text))
+    )[:8]
+    facts: list[str] = []
+    if bpm_candidates:
+        facts.append(
+            "BPM候補: "
+            + ", ".join(
+                f"{value:g}(support={bpm_support.get(value, 0)})"
+                for value in bpm_candidates
+            )
+        )
+    if key_candidates:
+        facts.append("キー候補: " + ", ".join(key_candidates))
+    for source in sources:
+        source.facts = list(facts)
+
     return ReferenceResearchResult(
         summary=text,
         sources=sources[:8],
-        bpm_candidates=bpm_candidates[:6],
-        key_candidates=key_candidates[:6],
+        bpm_candidates=bpm_candidates,
+        key_candidates=key_candidates,
+        bpm_support=bpm_support,
     )
