@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -155,23 +155,29 @@ class SpecialistSectionDraft(ApiModel):
     observations: list[str] = Field(default_factory=list)
 
 
+ShortResolutionReason = Annotated[str, Field(max_length=60)]
+ShortObservation = Annotated[str, Field(max_length=100)]
+ShortWarning = Annotated[str, Field(max_length=180)]
+ShortSectionSummary = Annotated[str, Field(max_length=100)]
+
+
 class ResolutionChoice(ApiModel):
     startSeconds: float = 0.0
     endSeconds: float = 0.0
     chosenSymbol: str = "X"
     confidence: float = 0.5
-    reason: str = ""
+    reason: ShortResolutionReason = ""
 
 
 class ResolutionDraft(ApiModel):
-    choices: list[ResolutionChoice] = Field(default_factory=list)
-    observations: list[str] = Field(default_factory=list)
+    choices: list[ResolutionChoice] = Field(default_factory=list, max_length=4)
+    observations: list[ShortObservation] = Field(default_factory=list, max_length=2)
 
 
 class FinalExplanationDraft(ApiModel):
-    musicalSummary: str = ""
-    warnings: list[str] = Field(default_factory=list)
-    sectionSummaries: dict[str, str] = Field(default_factory=dict)
+    musicalSummary: str = Field(default="", max_length=350)
+    warnings: list[ShortWarning] = Field(default_factory=list, max_length=8)
+    sectionSummaries: dict[str, ShortSectionSummary] = Field(default_factory=dict)
 
 
 # Final API models remain strict. Only deterministic Python is allowed to create
