@@ -14,7 +14,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 import music_agent.pipeline_v2 as pipeline_v2_module
 from music_agent import MusicCoordinatorAgent
-from music_agent.validators import validate_invariants, validate_quality
+from music_agent.chord_symbol import canonicalize_symbol
+from music_agent.harmonic_reconcile import validate_tempo_coverage
+from music_agent.validators import validate_invariants
 
 
 def _display_chords(result) -> list:
@@ -26,19 +28,32 @@ def _display_chords(result) -> list:
     ]
 
 
-def _chord_state_count(result) -> int:
+def _actual_chord_state_count(result) -> int:
     count = 0
-    previous: tuple[str, float] | None = None
     for section in result.sections:
-        for measure in section.measures:
-            for chord in measure.chords:
-                identity = (chord.symbol, chord.startSeconds)
-                if previous != identity:
-                    count += 1
-                previous = identity
-    diagnostics = result.diagnostics
-    if diagnostics and diagnostics.chordStateCount:
-        return diagnostics.chordStateCount
+        previous_symbol: str | None = None
+        previous_end = -1.0
+        events = sorted(
+            [
+                chord
+                for measure in section.measures
+                for chord in measure.chords
+            ],
+            key=lambda item: (
+                item.startSeconds,
+                item.endSeconds,
+                item.symbol,
+            ),
+        )
+        for chord in events:
+            symbol = canonicalize_symbol(chord.symbol)
+            if (
+                symbol != previous_symbol
+                or chord.startSeconds > previous_end + 0.003
+            ):
+                count += 1
+            previous_symbol = symbol
+            previous_end = max(previous_end, chord.endSeconds)
     return count
 
 
@@ -55,42 +70,144 @@ def _boundary_distance_beats(result, seconds: float) -> float:
     return min(phase, 1.0 - phase)
 
 
-def _maximum_section_bars(result) -> float:
-    bpm = result.track.bpm or 120.0
+def _beats_per_bar(result) -> int:
     signature = str(result.track.timeSignature or "4/4")
     try:
-        beats = int(signature.split("/", 1)[0])
-    except (TypeError, ValueError):
-        beats = 4
-    bar_duration = (60.0 / bpm) * max(1, beats)
+        return max(1, int(signature.split("/", 1)[0]))
+    except (TypeError, ValueError, IndexError):
+        return 4
+
+
+def _section_bars(result, section) -> float:
+    bpm = result.track.bpm or 120.0
+    bar_duration = (60.0 / bpm) * _beats_per_bar(result)
+    return (
+        section.endSeconds - section.startSeconds
+    ) / max(0.001, bar_duration)
+
+
+def _maximum_section_bars(result) -> float:
     return max(
-        (
-            (section.endSeconds - section.startSeconds) / bar_duration
-            for section in result.sections
-        ),
+        (_section_bars(result, section) for section in result.sections),
         default=0.0,
     )
 
 
+def _merged_section_state_count(section) -> int:
+    count = 0
+    previous_symbol: str | None = None
+    previous_end = -1.0
+    events = sorted(
+        [
+            chord
+            for measure in section.measures
+            for chord in measure.chords
+        ],
+        key=lambda item: (
+            item.startSeconds,
+            item.endSeconds,
+            item.symbol,
+        ),
+    )
+    for chord in events:
+        symbol = canonicalize_symbol(chord.symbol)
+        if (
+            symbol != previous_symbol
+            or chord.startSeconds > previous_end + 0.003
+        ):
+            count += 1
+        previous_symbol = symbol
+        previous_end = max(previous_end, chord.endSeconds)
+    return count
+
+
+def _suspicious_static_sections(result) -> list[dict[str, object]]:
+    major_types = {"verse", "pre_chorus", "chorus", "post_chorus"}
+    output: list[dict[str, object]] = []
+    for section in result.sections:
+        bars = _section_bars(result, section)
+        agreement = section.agreement if section.agreement is not None else 0.0
+        states = _merged_section_state_count(section)
+        if (
+            section.type in major_types
+            and bars >= 7.5
+            and states <= 1
+            and agreement < 0.60
+        ):
+            output.append(
+                {
+                    "id": section.id,
+                    "name": section.name,
+                    "bars": round(bars, 4),
+                    "stateCount": states,
+                    "agreement": round(agreement, 4),
+                }
+            )
+    return output
+
+
+def _section_key_modes(result) -> list[dict[str, object]]:
+    return [
+        {
+            "id": section.id,
+            "name": section.name,
+            "type": section.type,
+            "startSeconds": section.startSeconds,
+            "endSeconds": section.endSeconds,
+            "key": section.key,
+            "mode": section.mode,
+        }
+        for section in result.sections
+    ]
+
+
+def _reference_facts(result) -> list[dict[str, object]]:
+    return [
+        {
+            "title": source.title,
+            "url": source.url,
+            "facts": list(source.facts),
+        }
+        for source in result.referenceSources
+    ]
+
+
 def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]:
     invariant_errors = validate_invariants(result)
-    quality_errors = validate_quality(result)
+    invariant_errors.extend(validate_tempo_coverage(result))
+    invariant_errors = sorted(set(invariant_errors))
+    quality_errors = pipeline_v2_module.validate_quality(result)
     display_chords = _display_chords(result)
-    known_chords = [chord for chord in display_chords if chord.symbol not in {"X", "N"}]
-    unresolved = [item for item in result.uncertainRanges if not item.resolved]
+    known_chords = [
+        chord
+        for chord in display_chords
+        if canonicalize_symbol(chord.symbol) not in {"X", "N"}
+    ]
+    unresolved = [
+        item
+        for item in result.uncertainRanges
+        if not item.resolved
+    ]
     unresolved_coverage = sum(
         item.endSeconds - item.startSeconds
         for item in unresolved
     )
     diagnostics = result.diagnostics
-    required_failures = diagnostics.requiredModelFailures if diagnostics else []
+    required_failures = (
+        diagnostics.requiredModelFailures
+        if diagnostics
+        else []
+    )
     section_starts = [
         section.startSeconds
         for section in result.sections
         if section.startSeconds > 0.035
     ]
     maximum_boundary_error = max(
-        (_boundary_distance_beats(result, value) for value in section_starts),
+        (
+            _boundary_distance_beats(result, value)
+            for value in section_starts
+        ),
         default=0.0,
     )
     merged_sections = [
@@ -100,6 +217,7 @@ def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]
         or "〜" in section.name
         or "セクション数上限" in section.summary
     ]
+    actual_state_count = _actual_chord_state_count(result)
     return {
         "status": status,
         "elapsedSeconds": round(elapsed, 3),
@@ -110,30 +228,53 @@ def _result_summary(result, *, elapsed: float, status: str) -> dict[str, object]
         "bpm": result.track.bpm,
         "timeSignature": result.track.timeSignature,
         "globalKey": result.track.globalKey,
+        "globalMode": result.track.globalMode,
+        "tempoSegments": [
+            item.model_dump()
+            for item in result.tempoSegments
+        ],
         "sectionCount": len(result.sections),
+        "sectionKeyModes": _section_key_modes(result),
         "mergedSections": merged_sections,
-        "maximumSectionBars": round(_maximum_section_bars(result), 4),
-        "maximumBoundaryErrorBeats": round(maximum_boundary_error, 6),
-        "chordStateCount": _chord_state_count(result),
+        "maximumSectionBars": round(
+            _maximum_section_bars(result),
+            4,
+        ),
+        "maximumBoundaryErrorBeats": round(
+            maximum_boundary_error,
+            6,
+        ),
+        "chordStateCount": actual_state_count,
+        "diagnosticChordStateCount": (
+            diagnostics.chordStateCount
+            if diagnostics
+            else None
+        ),
         "displayChordEventCount": len(display_chords),
         "knownDisplayChordEventCount": len(known_chords),
+        "suspiciousStaticSections": _suspicious_static_sections(result),
         "uncertainRangeCount": len(result.uncertainRanges),
         "unresolvedRangeCount": len(unresolved),
-        "unresolvedCoverageSeconds": round(unresolved_coverage, 3),
+        "unresolvedCoverageSeconds": round(
+            unresolved_coverage,
+            3,
+        ),
         "unresolvedCoverageRatio": round(
             unresolved_coverage / result.track.durationSeconds,
             6,
         ) if result.track.durationSeconds > 0 else 0.0,
         "unresolvedReasons": sorted(
-            {
-                item.reason
-                for item in unresolved
-            }
+            {item.reason for item in unresolved}
         ),
+        "referenceFacts": _reference_facts(result),
         "requiredModelFailures": required_failures,
         "invariantErrors": invariant_errors,
         "qualityErrors": quality_errors,
-        "diagnostics": diagnostics.model_dump() if diagnostics else None,
+        "diagnostics": (
+            diagnostics.model_dump()
+            if diagnostics
+            else None
+        ),
     }
 
 
@@ -149,19 +290,27 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+    project = (
+        os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or os.environ.get("GCP_PROJECT")
+    )
     if not project:
         raise SystemExit("GOOGLE_CLOUD_PROJECT is required")
     os.environ.setdefault("ANALYSIS_PIPELINE", "v2")
     os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
-    os.environ.setdefault("GEMINI_RESOLVER_MODEL", os.environ["GEMINI_MODEL"])
+    os.environ.setdefault(
+        "GEMINI_RESOLVER_MODEL",
+        os.environ["GEMINI_MODEL"],
+    )
     os.environ.setdefault("MODEL_MAX_PARALLEL_CALLS", "4")
     os.environ.setdefault("MAX_RESOLVER_CALLS", "12")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     captured: dict[str, object] = {}
-    original_pipeline_validate_quality = pipeline_v2_module.validate_quality
+    original_pipeline_validate_quality = (
+        pipeline_v2_module.validate_quality
+    )
 
     def capture_quality_result(result):
         captured["result"] = result
@@ -170,7 +319,9 @@ def main() -> int:
     pipeline_v2_module.validate_quality = capture_quality_result
     started = time.perf_counter()
     try:
-        result = MusicCoordinatorAgent().analyze_youtube(url=args.youtube_url)
+        result = MusicCoordinatorAgent().analyze_youtube(
+            url=args.youtube_url
+        )
     except Exception as exc:  # noqa: BLE001 - command boundary
         elapsed = time.perf_counter() - started
         rejected_result = captured.get("result")
@@ -189,7 +340,9 @@ def main() -> int:
                 {
                     "errorType": type(exc).__name__,
                     "message": str(exc),
-                    "rejectedResult": str(rejected_path.resolve()),
+                    "rejectedResult": str(
+                        rejected_path.resolve()
+                    ),
                 }
             )
         else:
@@ -199,18 +352,36 @@ def main() -> int:
                 "errorType": type(exc).__name__,
                 "message": str(exc),
             }
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                summary,
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 10
     finally:
-        pipeline_v2_module.validate_quality = original_pipeline_validate_quality
+        pipeline_v2_module.validate_quality = (
+            original_pipeline_validate_quality
+        )
 
     elapsed = time.perf_counter() - started
-    summary = _result_summary(result, elapsed=elapsed, status="passed")
+    summary = _result_summary(
+        result,
+        elapsed=elapsed,
+        status="passed",
+    )
     args.output.write_text(
         result.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            summary,
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     print(f"RESULT={args.output.resolve()}")
 
     if summary["requiredModelFailures"]:
