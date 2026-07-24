@@ -399,85 +399,169 @@ def _validate_url_syntax(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise HTTPException(
-            status_code=400,
+            status_code=422,
             detail={"code": "invalid_url", "message": "有効なHTTPまたはHTTPS URLを指定してください。"},
         )
     if parsed.username or parsed.password:
         raise HTTPException(
-            status_code=400,
-            detail={"code": "invalid_url", "message": "認証情報を含むURLは使用できません。"},
+            status_code=422,
+            detail={"code": "invalid_url", "message": "認証情報を含むURLは指定できません。"},
         )
 
 
-def _is_public_address(address: str) -> bool:
-    ip = ipaddress.ip_address(address)
-    return not (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-def _validate_public_target(url: str) -> None:
+async def _validate_public_destination(url: str) -> None:
     _validate_url_syntax(url)
     parsed = urlparse(url)
-    host = parsed.hostname
-    assert host is not None
     try:
-        addresses = {
-            item[4][0]
-            for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
-        }
-    except socket.gaierror as exc:
+        port = parsed.port
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"code": "unreachable_url", "message": "URLのホスト名を解決できませんでした。"},
+            detail={"code": "invalid_url", "message": "URLのポート番号が不正です。"},
         ) from exc
-    if not addresses or any(not _is_public_address(address) for address in addresses):
+    if port not in {None, 80, 443}:
         raise HTTPException(
-            status_code=400,
-            detail={"code": "unsafe_url", "message": "プライベートネットワークまたは安全でないURLは使用できません。"},
+            status_code=422,
+            detail={"code": "unsafe_url", "message": "80番または443番以外のURLは指定できません。"},
         )
+
+    resolved_port = port or (443 if parsed.scheme == "https" else 80)
+
+    def resolve() -> list[str]:
+        results = socket.getaddrinfo(parsed.hostname, resolved_port, type=socket.SOCK_STREAM)
+        return list({item[4][0] for item in results})
+
+    try:
+        addresses = await asyncio.wait_for(asyncio.to_thread(resolve), timeout=5.0)
+    except (socket.gaierror, asyncio.TimeoutError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unresolvable_url", "message": "URLのホスト名を解決できません。"},
+        ) from exc
+    if not addresses:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "unresolvable_url", "message": "URLのホスト名を解決できません。"},
+        )
+    for value in addresses:
+        address = ipaddress.ip_address(value)
+        if not address.is_global:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "unsafe_url", "message": "プライベートネットワーク宛てのURLは指定できません。"},
+            )
 
 
 async def _download_public_audio(url: str, destination: Path) -> str:
     current_url = url
-    timeout = httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-        for _ in range(DOWNLOAD_REDIRECT_LIMIT + 1):
-            _validate_public_target(current_url)
-            async with client.stream("GET", current_url, headers={"User-Agent": "MusicChordAnalyzer/2.0"}) as response:
-                if response.status_code in {301, 302, 303, 307, 308}:
-                    location = response.headers.get("location")
-                    if not location:
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=20.0, pool=10.0)
+    headers = {"User-Agent": "MusicChordAnalyzer/1.0"}
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=False,
+        ) as client:
+            for redirect_count in range(DOWNLOAD_REDIRECT_LIMIT + 1):
+                await _validate_public_destination(current_url)
+                async with client.stream("GET", current_url) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if not location or redirect_count >= DOWNLOAD_REDIRECT_LIMIT:
+                            raise HTTPException(
+                                status_code=422,
+                                detail={
+                                    "code": "too_many_redirects",
+                                    "message": "音声URLのリダイレクトが多すぎます。",
+                                },
+                            )
+                        current_url = urljoin(current_url, location)
+                        continue
+
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
                         raise HTTPException(
                             status_code=422,
-                            detail={"code": "invalid_redirect", "message": "音声URLのリダイレクト先を取得できませんでした。"},
+                            detail={
+                                "code": "audio_download_failed",
+                                "message": (
+                                    "音声URLの取得に失敗しました"
+                                    f"（HTTP {response.status_code}）。"
+                                ),
+                            },
+                        ) from exc
+
+                    content_type = response.headers.get(
+                        "content-type",
+                        "application/octet-stream",
+                    )
+                    suffix = Path(urlparse(current_url).path).suffix.lower()
+                    if (
+                        not content_type.lower().startswith("audio/")
+                        and suffix not in ALLOWED_AUDIO_SUFFIXES
+                    ):
+                        raise HTTPException(
+                            status_code=415,
+                            detail={
+                                "code": "url_is_not_audio",
+                                "message": "URLが直接参照可能な音声ファイルではありません。",
+                            },
                         )
-                    current_url = urljoin(current_url, location)
-                    continue
-                response.raise_for_status()
-                content_type = response.headers.get("content-type", "application/octet-stream")
-                total = 0
-                with destination.open("wb") as handle:
-                    async for chunk in response.aiter_bytes(1024 * 1024):
-                        total += len(chunk)
-                        if total > MAX_UPLOAD_BYTES:
+
+                    declared_size = response.headers.get("content-length")
+                    if declared_size:
+                        try:
+                            declared_size_value = int(declared_size)
+                        except ValueError:
+                            declared_size_value = 0
+                        if declared_size_value > MAX_UPLOAD_BYTES:
                             raise HTTPException(
                                 status_code=413,
-                                detail={"code": "file_too_large", "message": "取得する音声ファイルは30MB以下にしてください。"},
+                                detail={
+                                    "code": "file_too_large",
+                                    "message": "音声URLは30MB以下にしてください。",
+                                },
                             )
-                        handle.write(chunk)
-                if total == 0:
-                    raise HTTPException(
-                        status_code=422,
-                        detail={"code": "empty_file", "message": "音声URLからデータを取得できませんでした。"},
-                    )
-                return content_type
+
+                    total = 0
+                    with destination.open("wb") as handle:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            total += len(chunk)
+                            if total > MAX_UPLOAD_BYTES:
+                                raise HTTPException(
+                                    status_code=413,
+                                    detail={
+                                        "code": "file_too_large",
+                                        "message": "音声URLは30MB以下にしてください。",
+                                    },
+                                )
+                            handle.write(chunk)
+                    if total == 0:
+                        raise HTTPException(
+                            status_code=422,
+                            detail={
+                                "code": "empty_audio",
+                                "message": "URLから取得した音声が空です。",
+                            },
+                        )
+                    return content_type
+    except HTTPException:
+        raise
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "audio_download_failed",
+                "message": "音声URLへ接続できませんでした。",
+            },
+        ) from exc
+
     raise HTTPException(
         status_code=422,
-        detail={"code": "too_many_redirects", "message": "音声URLのリダイレクト回数が上限を超えました。"},
+        detail={
+            "code": "audio_download_failed",
+            "message": "音声URLを取得できませんでした。",
+        },
     )
