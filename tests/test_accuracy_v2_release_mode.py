@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from music_agent.accuracy_v2_release_mode import (
     _append_degraded_warnings,
+    _compact_low_confidence_warnings,
     _is_fatal_quality_error,
     _max_degraded_unresolved_ratio,
     _strict_quality_gate,
@@ -107,6 +108,20 @@ class AccuracyV2ReleaseModeTests(unittest.TestCase):
             )
         )
         self.assertTrue(_is_fatal_quality_error("no_known_chords"))
+
+    def test_low_confidence_range_warnings_are_compacted(self) -> None:
+        result = self._result()
+        result.warnings = [
+            "section 0.00〜1.00秒は低信頼です。",
+            "section 1.00〜2.00秒は低信頼です。",
+            "other warning",
+        ]
+        _compact_low_confidence_warnings(result)
+        self.assertIn("other warning", result.warnings)
+        self.assertFalse(
+            any(item.endswith("秒は低信頼です。") for item in result.warnings)
+        )
+        self.assertTrue(any("低信頼区間は1件" in item for item in result.warnings))
 
     def test_degraded_result_explains_uncertain_coverage(self) -> None:
         result = self._result()
