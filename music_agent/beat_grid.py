@@ -41,6 +41,14 @@ class BeatGrid:
         return max(1.0, min(float(self.beats_per_bar), value))
 
 
+@dataclass(frozen=True, slots=True)
+class _BpmEvidence:
+    bpm: float
+    confidence: float
+    grounded: bool = False
+    selected: bool = False
+
+
 _TIME_SIGNATURE_RE = re.compile(r"\s*(\d+)\s*/\s*(\d+)\s*")
 
 
@@ -52,6 +60,10 @@ def _finite(value: object, default: float) -> float:
     return number if math.isfinite(number) else default
 
 
+def _clamp_confidence(value: object, default: float = 0.5) -> float:
+    return max(0.0, min(1.0, _finite(value, default)))
+
+
 def beats_per_bar(value: str | None) -> int:
     if not value:
         return 4
@@ -61,26 +73,78 @@ def beats_per_bar(value: str | None) -> int:
     return max(1, min(12, int(match.group(1))))
 
 
-def _normalise_bpm(value: float) -> list[float]:
-    value = _finite(value, 0.0)
-    if value <= 0.0:
-        return []
-    return [
-        round(value * multiplier, 4)
-        for multiplier in (0.5, 1.0, 2.0)
-        if 40.0 <= value * multiplier <= 240.0
-    ]
+def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvidence]:
+    evidence: dict[float, _BpmEvidence] = {}
 
+    def add(
+        raw_bpm: object,
+        confidence: object,
+        *,
+        grounded: bool = False,
+        selected: bool = False,
+    ) -> None:
+        bpm = round(_finite(raw_bpm, 0.0), 4)
+        if not 20.0 <= bpm <= 320.0:
+            return
+        candidate = _BpmEvidence(
+            bpm=bpm,
+            confidence=_clamp_confidence(confidence),
+            grounded=grounded,
+            selected=selected,
+        )
+        current = evidence.get(bpm)
+        if current is None:
+            evidence[bpm] = candidate
+            return
+        evidence[bpm] = _BpmEvidence(
+            bpm=bpm,
+            confidence=max(current.confidence, candidate.confidence),
+            grounded=current.grounded or candidate.grounded,
+            selected=current.selected or candidate.selected,
+        )
 
-def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[float]:
-    values: list[float] = []
-    if rhythm.selectedBpm:
-        values.extend(_normalise_bpm(rhythm.selectedBpm))
+    selected_bpm = _finite(rhythm.selectedBpm, 0.0) if rhythm.selectedBpm else 0.0
+    if selected_bpm > 0:
+        add(
+            selected_bpm,
+            rhythm.confidence,
+            selected=True,
+        )
+
     for candidate in rhythm.bpmCandidates:
-        values.extend(_normalise_bpm(candidate.bpm))
+        interpretation = str(candidate.interpretation or "").lower()
+        grounded = "grounded" in interpretation or "reference" in interpretation
+        confidence = candidate.confidence
+        if grounded:
+            # Multiple web catalogues agreeing on an exact released recording are
+            # a stronger tempo source than coarse model-generated section lengths.
+            confidence = max(_clamp_confidence(confidence), 0.92)
+        add(
+            candidate.bpm,
+            confidence,
+            grounded=grounded,
+            selected=abs(_finite(candidate.bpm, 0.0) - selected_bpm) < 0.1,
+        )
+
+    for segment in rhythm.tempoSegments:
+        length = max(0.0, _finite(segment.endSeconds, 0.0) - _finite(segment.startSeconds, 0.0))
+        if length <= 0:
+            continue
+        add(segment.bpm, segment.confidence)
+
     if dsp and dsp.bpm:
-        values.extend(_normalise_bpm(dsp.bpm))
-    return sorted(set(values or [120.0]))
+        add(dsp.bpm, 0.88, selected=not evidence)
+        # DSP tempo estimators can be half/double ambiguous. Only DSP evidence is
+        # expanded automatically; model and grounded candidates must be explicit.
+        dsp_bpm = _finite(dsp.bpm, 0.0)
+        for multiplier in (0.5, 2.0):
+            candidate = dsp_bpm * multiplier
+            if 40.0 <= candidate <= 240.0:
+                add(candidate, 0.58)
+
+    if not evidence:
+        add(120.0, 0.2, selected=True)
+    return sorted(evidence.values(), key=lambda item: item.bpm)
 
 
 def _integer_bar_error(
@@ -149,7 +213,7 @@ def _tempo_segments(
         start = max(0.0, min(duration, _finite(item.startSeconds, -1.0)))
         end = max(0.0, min(duration, _finite(item.endSeconds, -1.0)))
         bpm = _finite(item.bpm, 0.0)
-        confidence = max(0.0, min(1.0, _finite(item.confidence, 0.5)))
+        confidence = _clamp_confidence(item.confidence)
         if start < duration and end > start and 20.0 <= bpm <= 320.0:
             output.append(
                 TempoSegment(
@@ -159,13 +223,24 @@ def _tempo_segments(
                     confidence=confidence,
                 )
             )
+
+    # A single full-track tempo segment is a summary, not an independent tempo
+    # map. It must agree with the selected grid or be replaced to avoid outputs
+    # such as track.bpm=240 with tempoSegments=120.
+    if len(output) == 1:
+        segment = output[0]
+        coverage = (segment.endSeconds - segment.startSeconds) / duration
+        ratio = max(segment.bpm, selected_bpm) / min(segment.bpm, selected_bpm)
+        if coverage >= 0.8 and ratio > 1.03:
+            output = []
+
     if not output:
         output.append(
             TempoSegment(
                 startSeconds=0.0,
                 endSeconds=max(0.001, duration),
                 bpm=selected_bpm,
-                confidence=max(0.0, min(1.0, _finite(rhythm.confidence, 0.5))),
+                confidence=_clamp_confidence(rhythm.confidence),
             )
         )
     return tuple(sorted(output, key=lambda item: item.startSeconds))
@@ -189,29 +264,44 @@ def build_beat_grid(
     beats = beats_per_bar(signature)
     observed = list(dsp.beatTimes) if dsp else []
     best: tuple[float, float, float] | None = None
-    selected_model_bpm = _finite(rhythm.selectedBpm, 0.0) if rhythm.selectedBpm else 0.0
 
-    for bpm in _candidate_bpms(rhythm, dsp):
+    for evidence in _candidate_bpms(rhythm, dsp):
+        bpm = evidence.bpm
         integer_error = _integer_bar_error(bpm, beats, sections)
         for offset in _offset_candidates(bpm, beats, rhythm, dsp):
             beat_error = _beat_alignment_error(bpm, offset, observed)
             section_error = _section_alignment_error(bpm, beats, offset, sections)
-            model_prior = 0.0
-            if selected_model_bpm > 0:
-                ratio = max(bpm, selected_model_bpm) / min(bpm, selected_model_bpm)
-                model_prior = (
-                    min(1.0, abs(math.log2(ratio)))
-                    * profile.grid_model_prior_weight
+
+            if observed:
+                error = (
+                    integer_error * profile.grid_integer_bar_weight
+                    + beat_error * profile.grid_beat_alignment_weight
+                    + section_error * profile.grid_section_alignment_weight
+                    + (1.0 - evidence.confidence) * profile.grid_model_prior_weight
                 )
-            score = 1.0 - min(
-                1.0,
-                integer_error * profile.grid_integer_bar_weight
-                + beat_error * profile.grid_beat_alignment_weight
-                + section_error * profile.grid_section_alignment_weight
-                + model_prior,
-            )
-            if best is None or score > best[0]:
+                score = 1.0 - min(1.0, error)
+            else:
+                # AI-generated section boundaries are commonly rounded to whole
+                # seconds and must never dominate tempo selection. Confidence and
+                # grounded metadata are primary; boundary fit is only a tie-break.
+                confidence_score = evidence.confidence
+                if evidence.grounded:
+                    confidence_score = max(confidence_score, 0.94)
+                elif evidence.selected:
+                    confidence_score = min(1.0, confidence_score + 0.03)
+                score = (
+                    confidence_score * 0.82
+                    + (1.0 - section_error) * 0.10
+                    + (1.0 - integer_error) * 0.08
+                )
+
+            if best is None or score > best[0] + 1e-9:
                 best = (score, bpm, offset)
+            elif best is not None and abs(score - best[0]) <= 1e-9:
+                # Prefer a lower, conventional counting level over a false
+                # double-time candidate when the evidence score is identical.
+                if bpm < best[1]:
+                    best = (score, bpm, offset)
 
     assert best is not None
     score, bpm, offset = best
