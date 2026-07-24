@@ -68,6 +68,30 @@ def _unresolved_ratio(result) -> float:
     return max(0.0, seconds / duration)
 
 
+def _compact_low_confidence_warnings(result) -> None:
+    range_warnings = [
+        warning
+        for warning in result.warnings
+        if warning.endswith("秒は低信頼です。") and "〜" in warning
+    ]
+    retained = [
+        warning
+        for warning in result.warnings
+        if warning not in range_warnings
+    ]
+    unresolved_count = sum(
+        1 for item in result.uncertainRanges if not item.resolved
+    )
+    ratio = _unresolved_ratio(result)
+    if range_warnings or unresolved_count:
+        retained.append(
+            f"低信頼区間は{unresolved_count or len(range_warnings)}件"
+            f"（全体の{ratio * 100:.1f}%）です。"
+            "各コードの候補と信頼度を音源と照合してください。"
+        )
+    result.warnings = list(dict.fromkeys(retained))[:32]
+
+
 def _append_degraded_warnings(result, errors: list[str]) -> None:
     ratio = _unresolved_ratio(result)
     warnings = list(result.warnings)
@@ -89,7 +113,7 @@ def _append_degraded_warnings(result, errors: list[str]) -> None:
         "本番モードでは、時間軸と既知コードの品質を満たし、未確定率が許容上限以内の場合に限り、"
         "resolverの一時障害が残っても未確定区間を明示して結果を返します。"
     )
-    result.warnings = list(dict.fromkeys(warnings))
+    result.warnings = list(dict.fromkeys(warnings))[:32]
     result.limitations = list(dict.fromkeys(limitations))
 
 
@@ -101,6 +125,7 @@ def _release_run(self, *args, **kwargs):
         finalization_v2._CONTEXT.defer_quality = False
 
     finalization_v2.finalize_result_before_quality(result)
+    _compact_low_confidence_warnings(result)
     invariant_errors = pipeline_module.validate_invariants(result)
     invariant_errors.extend(validate_tempo_coverage(result))
     invariant_errors = sorted(set(invariant_errors))
@@ -136,10 +161,9 @@ def _release_run(self, *args, **kwargs):
         if strict
         else [error for error in quality_errors if _is_fatal_quality_error(error)]
     )
-    if not strict and _unresolved_ratio(result) > _max_degraded_unresolved_ratio():
-        fatal_errors.append(
-            f"excessive_unresolved_coverage:{_unresolved_ratio(result):.3f}"
-        )
+    ratio = _unresolved_ratio(result)
+    if not strict and ratio > _max_degraded_unresolved_ratio():
+        fatal_errors.append(f"excessive_unresolved_coverage:{ratio:.3f}")
     fatal_errors = sorted(set(fatal_errors))
     if fatal_errors:
         raise RuntimeError(
