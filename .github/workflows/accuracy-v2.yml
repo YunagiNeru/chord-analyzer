@@ -40,10 +40,20 @@ jobs:
         run: python -m unittest tests.test_sequence_optimizer -v
       - name: Test consensus
         run: python -m unittest tests.test_consensus -v
+      - name: Test repeated motif reconciliation
+        run: python -m unittest tests.test_motif_reconcile -v
       - name: Test validators
         run: python -m unittest tests.test_validators -v
+      - name: Test review snapshot rebuild
+        run: python -m unittest tests.test_review_rebuilder -v
       - name: Test media sources
         run: python -m unittest tests.test_media_source -v
+      - name: Test model output recovery
+        run: python -m unittest tests.test_model_output_recovery -v
+      - name: Test reference research
+        run: python -m unittest tests.test_reference_research -v
+      - name: Test script entrypoints
+        run: python -m unittest tests.test_script_entrypoints -v
       - name: Test API compatibility
         run: python -m unittest tests.test_api_compatibility -v
       - name: Test pipeline orchestration
