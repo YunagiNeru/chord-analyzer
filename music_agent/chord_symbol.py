@@ -219,8 +219,13 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
     elif chord.quality == "power":
         suffix = "5"
 
+    altered_ninth = any(token in {"b9", "#9"} for token in chord.alterations)
     extension_degree = next(
-        (token for token in ("13", "11", "9") if token in chord.extensions),
+        (
+            token
+            for token in ("13", "11", "9")
+            if token in chord.extensions and not (token == "9" and altered_ninth)
+        ),
         None,
     )
 
@@ -247,7 +252,7 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
 
     if not simplify:
         for extension in chord.extensions:
-            if extension == extension_degree:
+            if extension == extension_degree or (extension == "9" and altered_ninth):
                 continue
             if extension.startswith("add"):
                 suffix += extension
