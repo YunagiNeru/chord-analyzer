@@ -76,7 +76,7 @@ MusicCoordinatorAgent
 | `GEMINI_RESOLVER_MODEL` | `GEMINI_MODEL`と同じ | 不一致解決モデル |
 | `ANALYSIS_PIPELINE` | `v2` | `v2` または明示的ロールバック用の `legacy` |
 | `MODEL_MAX_PARALLEL_CALLS` | `4` | 同時モデル呼び出し上限 |
-| `MAX_RESOLVER_CALLS` | `4` | 局所不一致解決の最大回数 |
+| `MAX_RESOLVER_CALLS` | `12` | 局所不一致解決の最大回数 |
 | `ENABLE_REFERENCE_RESEARCH` | `1` | Google Search補助調査 |
 | `YOUTUBE_API_KEY` | 未設定 | YouTube Data APIによる正式メタデータ取得 |
 | `LOG_LEVEL` | `INFO` | ログレベル |
