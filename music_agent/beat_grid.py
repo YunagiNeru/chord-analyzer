@@ -47,6 +47,9 @@ class _BpmEvidence:
     confidence: float
     grounded: bool = False
     selected: bool = False
+    tempo_segment: bool = False
+    dsp: bool = False
+    mentions: int = 1
 
 
 _TIME_SIGNATURE_RE = re.compile(r"\s*(\d+)\s*/\s*(\d+)\s*")
@@ -82,6 +85,8 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
         *,
         grounded: bool = False,
         selected: bool = False,
+        tempo_segment: bool = False,
+        dsp_source: bool = False,
     ) -> None:
         bpm = round(_finite(raw_bpm, 0.0), 4)
         if not 20.0 <= bpm <= 320.0:
@@ -91,6 +96,9 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
             confidence=_clamp_confidence(confidence),
             grounded=grounded,
             selected=selected,
+            tempo_segment=tempo_segment,
+            dsp=dsp_source,
+            mentions=1,
         )
         current = evidence.get(bpm)
         if current is None:
@@ -101,6 +109,9 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
             confidence=max(current.confidence, candidate.confidence),
             grounded=current.grounded or candidate.grounded,
             selected=current.selected or candidate.selected,
+            tempo_segment=current.tempo_segment or candidate.tempo_segment,
+            dsp=current.dsp or candidate.dsp,
+            mentions=current.mentions + 1,
         )
 
     selected_bpm = _finite(rhythm.selectedBpm, 0.0) if rhythm.selectedBpm else 0.0
@@ -125,18 +136,30 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
         )
 
     for segment in rhythm.tempoSegments:
-        length = max(0.0, _finite(segment.endSeconds, 0.0) - _finite(segment.startSeconds, 0.0))
+        length = max(
+            0.0,
+            _finite(segment.endSeconds, 0.0) - _finite(segment.startSeconds, 0.0),
+        )
         if length <= 0:
             continue
-        add(segment.bpm, segment.confidence)
+        add(
+            segment.bpm,
+            segment.confidence,
+            tempo_segment=True,
+        )
 
     if dsp and dsp.bpm:
-        add(dsp.bpm, 0.88, selected=not evidence)
+        add(
+            dsp.bpm,
+            0.88,
+            selected=not evidence,
+            dsp_source=True,
+        )
         dsp_bpm = _finite(dsp.bpm, 0.0)
         for multiplier in (0.5, 2.0):
             candidate = dsp_bpm * multiplier
             if 40.0 <= candidate <= 240.0:
-                add(candidate, 0.58)
+                add(candidate, 0.58, dsp_source=True)
 
     if not evidence:
         add(120.0, 0.2, selected=True)
@@ -239,6 +262,34 @@ def _tempo_segments(
     return tuple(sorted(output, key=lambda item: item.startSeconds))
 
 
+def _evidence_strength(evidence: _BpmEvidence) -> float:
+    corroboration = min(
+        1.0,
+        0.28 * evidence.mentions
+        + (0.20 if evidence.selected else 0.0)
+        + (0.24 if evidence.tempo_segment else 0.0)
+        + (0.18 if evidence.dsp else 0.0),
+    )
+    return min(1.0, evidence.confidence * 0.58 + corroboration * 0.42)
+
+
+def _anchor_bpm(rhythm: RhythmDraft, candidates: list[_BpmEvidence]) -> tuple[float | None, float]:
+    selected = _finite(rhythm.selectedBpm, 0.0) if rhythm.selectedBpm else 0.0
+    if selected > 0:
+        matching = next((item for item in candidates if abs(item.bpm - selected) < 0.1), None)
+        confidence = matching.confidence if matching else _clamp_confidence(rhythm.confidence)
+        return selected, confidence
+
+    segment_candidates = [item for item in candidates if item.tempo_segment]
+    if segment_candidates:
+        best = max(
+            segment_candidates,
+            key=lambda item: (_evidence_strength(item), item.confidence, -item.bpm),
+        )
+        return best.bpm, best.confidence
+    return None, 0.0
+
+
 def build_beat_grid(
     *,
     rhythm: RhythmDraft,
@@ -259,6 +310,7 @@ def build_beat_grid(
     best: tuple[float, float, float] | None = None
     candidates = _candidate_bpms(rhythm, dsp)
     has_grounded = any(item.grounded for item in candidates)
+    anchor_bpm, anchor_confidence = _anchor_bpm(rhythm, candidates)
 
     for evidence in candidates:
         bpm = evidence.bpm
@@ -272,28 +324,51 @@ def build_beat_grid(
                     integer_error * profile.grid_integer_bar_weight
                     + beat_error * profile.grid_beat_alignment_weight
                     + section_error * profile.grid_section_alignment_weight
-                    + (1.0 - evidence.confidence) * profile.grid_model_prior_weight
+                    + (1.0 - _evidence_strength(evidence))
+                    * profile.grid_model_prior_weight
                 )
                 score = 1.0 - min(1.0, error)
             else:
-                confidence_score = evidence.confidence
+                support_score = _evidence_strength(evidence)
                 if has_grounded:
                     if evidence.grounded:
-                        confidence_score = max(confidence_score, 0.99)
+                        support_score = min(1.0, support_score + 0.30)
                     else:
-                        confidence_score *= 0.70
-                elif evidence.selected:
-                    confidence_score = min(1.0, confidence_score + 0.03)
+                        support_score *= 0.58
+                else:
+                    if evidence.selected:
+                        support_score = min(1.0, support_score + 0.07)
+                    if evidence.tempo_segment:
+                        support_score = min(1.0, support_score + 0.10)
+
+                if anchor_bpm and anchor_bpm > 0 and not evidence.grounded:
+                    ratio_distance = abs(math.log2(bpm / anchor_bpm))
+                    if ratio_distance > 0.08:
+                        support_score -= min(
+                            0.42,
+                            ratio_distance * 0.34 * max(0.35, anchor_confidence),
+                        )
+
+                support_score = max(0.0, min(1.0, support_score))
+                # Rounded section boundaries are weak timing evidence. They must
+                # never outweigh two independent model signals that agree on BPM.
                 score = (
-                    confidence_score * 0.82
-                    + (1.0 - section_error) * 0.10
-                    + (1.0 - integer_error) * 0.08
+                    support_score * 0.90
+                    + (1.0 - section_error) * 0.06
+                    + (1.0 - integer_error) * 0.04
                 )
 
             if best is None or score > best[0] + 1e-9:
                 best = (score, bpm, offset)
             elif best is not None and abs(score - best[0]) <= 1e-9:
-                if bpm < best[1]:
+                if anchor_bpm:
+                    current_distance = abs(math.log2(best[1] / anchor_bpm))
+                    new_distance = abs(math.log2(bpm / anchor_bpm))
+                    if new_distance < current_distance - 1e-9:
+                        best = (score, bpm, offset)
+                    elif abs(new_distance - current_distance) <= 1e-9 and bpm < best[1]:
+                        best = (score, bpm, offset)
+                elif bpm < best[1]:
                     best = (score, bpm, offset)
 
     assert best is not None
