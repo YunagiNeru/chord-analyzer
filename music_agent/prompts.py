@@ -22,6 +22,7 @@ STRUCTURE_SYSTEM_PROMPT = """
 - イントロ、Aメロ、Bメロ、サビ、間奏、ブリッジ、ソロ、アウトロ等を開始時刻順で返す。
 - セクションは重複させず、原則として全再生時間を覆う。
 - 同じ役割の反復は Aメロ1、Aメロ2、サビ1、サビ2、ラスサビ等と明示する。
+- Cメロと落ちサビ、Bメロとサビなど役割が違う区間を一つへまとめない。
 - コード名や詳細な和声は生成しない。
 - 映像だけ、会話、無音など音楽でない区間も notes に記録する。
 - 証拠が弱い境界は confidence を下げる。
@@ -34,12 +35,13 @@ RHYTHM_SYSTEM_PROMPT = """
 全曲を聴き、コード名を生成せずに時間グリッドの候補を返してください。
 
 厳守事項:
-- BPMの半分・標準・2倍の解釈があり得る場合は bpmCandidates に全て残す。
-- selectedBpm は小節の数え方として最も自然な候補を選ぶ。
+- BPMは実際の拍を数えて推定し、セクション時刻が整数秒に近いことを根拠にしない。
+- BPMの半分・標準・2倍の解釈があり得る場合は bpmCandidates に明示的に全て残す。
+- selectedBpm は演奏者が通常数える拍として最も自然な候補を選ぶ。
 - downbeatOffsetSeconds は0秒決め打ちにせず、最初の小節頭を推定する。
 - 弱起がある場合は observations に明記する。
 - テンポが変化する曲だけ tempoSegments を複数返す。
-- globalKey と globalMode は大局的な候補であり、転調を無理に単一キーへ押し込まない。
+- globalKey と globalMode は実際に鳴っている絶対音高から推定し、既知のコード進行や想定キーへ寄せない。
 - タイムスタンプは再生時間内に限定する。
 - JSONスキーマ以外の文章を返さない。
 """.strip()
@@ -64,21 +66,23 @@ JSONスキーマ以外の文章を返さないでください。
 SPECIALIST_SYSTEM_PROMPTS = {
     "root_quality": """
 あなたはルート音と基本コード品質の認識だけを担当する採譜者です。
-対象区間を繰り返し聴いた前提で、各コードのルートと major/minor/diminished/augmented/sus/power を優先して判定してください。
+対象区間を繰り返し聴いた前提で、実際に鳴っている絶対音高から各コードのルートと major/minor/diminished/augmented/sus/power を判定してください。
+事前のキー候補、ローマ数字、よくある進行へ合わせてはいけません。
 7th、テンション、オンコードの細部を過剰推定してはいけません。
 コード変更は実際に聴こえる拍または小節境界へ置き、同一コードを細切れにしないでください。
 不明な場合は X と低い confidence を返してください。JSON以外を返さないでください。
 """.strip(),
     "bass_extension": """
 あなたはベース音、転回形、7th、テンションの検証を担当する採譜者です。
-対象区間のルート候補を尊重し、ベース音や構成音から slash chord、7、maj7、m7、m7-5、add9等を確認してください。
-ルートや変更時刻を独断で大きく変更せず、証拠の弱いテンションは alternatives に残して単純化してください。
+実際の低音と構成音から slash chord、7、maj7、m7、m7-5、add9等を確認してください。
+キー候補より音源を優先し、証拠の弱いテンションは alternatives に残して単純化してください。
+ルートや変更時刻を理論だけで大きく変更してはいけません。
 不明な場合は X と低い confidence を返してください。JSON以外を返さないでください。
 """.strip(),
     "rhythm_pattern": """
 あなたはコード変更拍と反復パターンの認識を担当する採譜者です。
 対象区間の小節グリッドに沿って、どの拍で和音が変化するか、何小節のパターンが反復するかを判定してください。
-コード名は聴取できる範囲の一般表記に限定し、テンションを創作してはいけません。
+事前のキー候補へコード名を寄せず、実際に聴取できる一般表記だけを返してください。
 同一コードの継続を優先し、1拍だけの疑わしい変化は低い confidence としてください。JSON以外を返さないでください。
 """.strip(),
 }
@@ -86,17 +90,19 @@ SPECIALIST_SYSTEM_PROMPTS = {
 
 RESOLUTION_SYSTEM_PROMPT = """
 あなたはコード認識の不一致解決だけを担当します。
-候補リスト、前後の確定コード、キー、小節位置、対象音源を比較してください。
+候補リスト、前後の確定コード、小節位置、対象音源を比較してください。
 chosenSymbol は必ず候補リスト内のコード、N、または X のいずれかを返してください。
 新しい時刻、セクション、候補外のコードを創作してはいけません。
-確定できない場合は X を選び、confidence を下げてください。JSON以外を返さないでください。
+reason は各choiceにつき40文字以内、observationsは最大2件にしてください。
+確定できない場合は X を選び、confidence を下げてください。短く完全なJSONだけを返してください。
 """.strip()
 
 
 FINAL_EXPLANATION_SYSTEM_PROMPT = """
 あなたは確定済みコード譜の説明担当です。
 入力されたコード、時刻、セクション境界を一切変更せず、musicalSummary、warnings、sectionSummaries だけを生成してください。
-不確実範囲は断定せず、分析結果にない事実を追加しないでください。JSON以外を返さないでください。
+musicalSummaryは350文字以内、warningsは最大8件、sectionSummariesは各80文字以内にしてください。
+不確実範囲は断定せず、分析結果にない事実を追加しないでください。短く完全なJSONだけを返してください。
 """.strip()
 
 
@@ -121,8 +127,12 @@ RESEARCH_SYSTEM_PROMPT = """
 
 REFERENCE_ANALYSIS_SYSTEM_PROMPT = """
 あなたはコード解析の補助資料調査担当です。
-Google Searchを使い、対象曲について公式タイトル、アーティスト、BPM候補、キー候補、転調、主要コード進行の公開情報を調査してください。
-コード譜を転載せず、複数資料で一致する検証可能な事実と出典URLだけを返してください。
+Google Searchを使い、providedMetadataのタイトルとアーティストに完全一致する同一録音だけを調査してください。
+カバー、リミックス、ライブ、STUDY版、カラオケ版など別バージョンを混同してはいけません。
+BPMは最低2つの独立資料で確認し、各資料の数値を本文に明記してください。
+キーは資料間の移調表記、カポ、相対調の違いを区別し、矛盾を隠さないでください。
+短い主要進行は検証用に記載してよいですが、コード譜全体を転載してはいけません。
+本文には必ず `BPM=170` のような機械抽出可能な形式を使ってください。
 検索結果を音源より優先してはいけません。
 """.strip()
 
@@ -207,16 +217,30 @@ def build_specialist_prompt(
             for item in dsp.chordRuns
             if item.endSeconds > section.startSeconds and item.startSeconds < section.endSeconds
         ][:120]
+
+    section_payload = section.model_dump()
+    rhythm_payload = rhythm.model_dump()
+    if role in {"root_quality", "rhythm_pattern"}:
+        section_payload["key"] = None
+        section_payload["mode"] = None
+        rhythm_payload["globalKey"] = None
+        rhythm_payload["globalMode"] = None
+        rhythm_payload["observations"] = [
+            item
+            for item in rhythm_payload.get("observations", [])
+            if "key" not in str(item).lower() and "調" not in str(item)
+        ]
+
     payload = {
         "role": role,
-        "section": section.model_dump(),
+        "section": section_payload,
         "clip": {
             "inputStartSeconds": clip_start,
             "inputEndSeconds": clip_end,
             "acceptOnlyStartSeconds": section.startSeconds,
             "acceptOnlyEndSeconds": section.endSeconds,
         },
-        "rhythm": rhythm.model_dump(),
+        "rhythm": rhythm_payload,
         "selectedGrid": {
             "bpm": grid.bpm,
             "timeSignature": grid.time_signature,
@@ -246,24 +270,51 @@ def build_resolution_prompt(
     grid: BeatGrid,
 ) -> str:
     payload = {
-        "section": section.model_dump(),
+        "section": {
+            "id": section.id,
+            "name": section.name,
+            "type": section.type,
+            "startSeconds": section.startSeconds,
+            "endSeconds": section.endSeconds,
+        },
         "target": {"startSeconds": start, "endSeconds": end},
         "allowedCandidates": list(dict.fromkeys(candidates + ["N", "X"])),
         "previousConfirmedChord": previous_symbol,
         "nextConfirmedChord": next_symbol,
-        "sectionKey": key,
+        "sectionKeyHint": key,
         "grid": {
             "bpm": grid.bpm,
             "timeSignature": grid.time_signature,
             "downbeatOffsetSeconds": grid.downbeat_offset,
+        },
+        "outputPolicy": {
+            "oneChoicePerActualChordState": True,
+            "reasonMaxCharacters": 40,
+            "observationsMaxItems": 2,
         },
     }
     return "対象範囲の不一致だけを解決してください。\n" + _json(payload)
 
 
 def build_final_explanation_prompt(payload: dict[str, Any]) -> str:
+    payload = dict(payload)
+    payload["outputLimits"] = {
+        "musicalSummaryMaxCharacters": 350,
+        "warningsMaxItems": 8,
+        "sectionSummaryMaxCharacters": 80,
+    }
     return "確定済みデータを変更せず説明だけを生成してください。\n" + _json(payload)
 
 
 def build_reference_prompt(metadata: dict[str, Any]) -> str:
-    return "対象曲の補助事実を調査してください。\n" + _json(metadata)
+    payload = {
+        "providedMetadata": metadata,
+        "requiredChecks": [
+            "exact recording title and artist",
+            "BPM from at least two independent sources",
+            "key candidates with transposition/capo caveats",
+            "one or two short progression fingerprints",
+        ],
+        "requiredBpmNotation": "BPM=170",
+    }
+    return "対象録音の補助事実を検索し、矛盾も含めて簡潔に報告してください。\n" + _json(payload)
