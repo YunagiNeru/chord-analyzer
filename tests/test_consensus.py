@@ -108,6 +108,42 @@ class ConsensusTests(unittest.TestCase):
         self.assertTrue(output.uncertain_ranges)
         self.assertIn("独立分析", output.uncertain_ranges[0].reason)
 
+    def test_sparse_change_events_remain_stateful_between_boundaries(self) -> None:
+        specialists = []
+        for role in ("root_quality", "bass_extension", "rhythm_pattern"):
+            specialists.append(
+                SpecialistSectionDraft(
+                    sectionId="chorus-1",
+                    role=role,
+                    chords=[
+                        SpecialistChordDraft(
+                            symbol="C",
+                            startSeconds=0.0,
+                            endSeconds=0.45,
+                            confidence=0.9,
+                        ),
+                        SpecialistChordDraft(
+                            symbol="G",
+                            startSeconds=1.55,
+                            endSeconds=2.0,
+                            confidence=0.9,
+                        ),
+                    ],
+                )
+            )
+
+        output = consensus_section(
+            section=self.section,
+            specialists=specialists,
+            grid=self.grid,
+        )
+
+        self.assertEqual(output.uncertain_ranges, [])
+        self.assertEqual(output.chords[0].symbol, "C")
+        self.assertEqual(output.chords[-1].symbol, "G")
+        self.assertEqual(output.chords[0].startSeconds, 0.0)
+        self.assertEqual(output.chords[-1].endSeconds, 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()
