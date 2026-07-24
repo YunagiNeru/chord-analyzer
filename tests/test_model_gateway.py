@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from music_agent.model_gateway import ModelGateway
 from music_agent.schemas import (
@@ -12,16 +12,28 @@ from music_agent.schemas import (
 )
 
 
+def _contains_schema_key(value: Any, target: str) -> bool:
+    if isinstance(value, dict):
+        return target in value or any(
+            _contains_schema_key(item, target)
+            for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_schema_key(item, target) for item in value)
+    return False
+
+
 class ModelGatewayTests(unittest.TestCase):
     def test_compact_specialist_uses_unbounded_vertex_request_schema(self) -> None:
         request_schema = ModelGateway._request_schema(CompactSpecialistDraft)
 
         self.assertIsNot(request_schema, CompactSpecialistDraft)
-        request_schema_json = json.dumps(
-            request_schema.model_json_schema(),
-            ensure_ascii=False,
+        self.assertFalse(
+            _contains_schema_key(
+                request_schema.model_json_schema(),
+                "maxItems",
+            )
         )
-        self.assertNotIn("maxItems", request_schema_json)
 
         parsed_for_vertex = request_schema.model_validate(
             {
