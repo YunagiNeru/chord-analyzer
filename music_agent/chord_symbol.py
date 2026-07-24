@@ -74,10 +74,6 @@ def _normalise_suffix(raw: str) -> str:
     value = value.replace("minor", "m").replace("min", "m")
     value = value.replace("major", "maj")
     value = re.sub(r"\s+", "", value)
-
-    # Model output sometimes concatenates seventh and extension degrees as
-    # `maj79` or `79b9`. Convert those into standard compact notation before
-    # parsing so the UI never receives malformed symbols such as Emaj79.
     value = re.sub(r"(?i)^maj7(?:add)?13", "maj13", value)
     value = re.sub(r"(?i)^maj7(?:add)?11", "maj11", value)
     value = re.sub(r"(?i)^maj7(?:add)?9", "maj9", value)
@@ -223,8 +219,25 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
     elif chord.quality == "power":
         suffix = "5"
 
+    extension_degree = next(
+        (token for token in ("13", "11", "9") if token in chord.extensions),
+        None,
+    )
+
     if chord.quality == "diminished" and chord.seventh == "minor7":
         suffix = "m7-5"
+    elif not simplify and extension_degree and chord.seventh == "major7":
+        if chord.quality == "minor":
+            suffix = f"mMaj{extension_degree}"
+        else:
+            suffix = f"maj{extension_degree}"
+    elif not simplify and extension_degree and chord.seventh == "minor7":
+        if chord.quality == "minor":
+            suffix = f"m{extension_degree}"
+        elif chord.quality == "major":
+            suffix = extension_degree
+        else:
+            suffix += extension_degree
     elif chord.seventh == "major7":
         suffix += "maj7"
     elif chord.seventh == "minor7":
@@ -234,6 +247,8 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
 
     if not simplify:
         for extension in chord.extensions:
+            if extension == extension_degree:
+                continue
             if extension.startswith("add"):
                 suffix += extension
             elif extension not in suffix:
