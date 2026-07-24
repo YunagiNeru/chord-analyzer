@@ -116,8 +116,6 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
         grounded = "grounded" in interpretation or "reference" in interpretation
         confidence = candidate.confidence
         if grounded:
-            # Multiple web catalogues agreeing on an exact released recording are
-            # a stronger tempo source than coarse model-generated section lengths.
             confidence = max(_clamp_confidence(confidence), 0.92)
         add(
             candidate.bpm,
@@ -134,8 +132,6 @@ def _candidate_bpms(rhythm: RhythmDraft, dsp: DspSummary | None) -> list[_BpmEvi
 
     if dsp and dsp.bpm:
         add(dsp.bpm, 0.88, selected=not evidence)
-        # DSP tempo estimators can be half/double ambiguous. Only DSP evidence is
-        # expanded automatically; model and grounded candidates must be explicit.
         dsp_bpm = _finite(dsp.bpm, 0.0)
         for multiplier in (0.5, 2.0):
             candidate = dsp_bpm * multiplier
@@ -224,9 +220,6 @@ def _tempo_segments(
                 )
             )
 
-    # A single full-track tempo segment is a summary, not an independent tempo
-    # map. It must agree with the selected grid or be replaced to avoid outputs
-    # such as track.bpm=240 with tempoSegments=120.
     if len(output) == 1:
         segment = output[0]
         coverage = (segment.endSeconds - segment.startSeconds) / duration
@@ -264,8 +257,10 @@ def build_beat_grid(
     beats = beats_per_bar(signature)
     observed = list(dsp.beatTimes) if dsp else []
     best: tuple[float, float, float] | None = None
+    candidates = _candidate_bpms(rhythm, dsp)
+    has_grounded = any(item.grounded for item in candidates)
 
-    for evidence in _candidate_bpms(rhythm, dsp):
+    for evidence in candidates:
         bpm = evidence.bpm
         integer_error = _integer_bar_error(bpm, beats, sections)
         for offset in _offset_candidates(bpm, beats, rhythm, dsp):
@@ -281,12 +276,12 @@ def build_beat_grid(
                 )
                 score = 1.0 - min(1.0, error)
             else:
-                # AI-generated section boundaries are commonly rounded to whole
-                # seconds and must never dominate tempo selection. Confidence and
-                # grounded metadata are primary; boundary fit is only a tie-break.
                 confidence_score = evidence.confidence
-                if evidence.grounded:
-                    confidence_score = max(confidence_score, 0.94)
+                if has_grounded:
+                    if evidence.grounded:
+                        confidence_score = max(confidence_score, 0.99)
+                    else:
+                        confidence_score *= 0.70
                 elif evidence.selected:
                     confidence_score = min(1.0, confidence_score + 0.03)
                 score = (
@@ -298,8 +293,6 @@ def build_beat_grid(
             if best is None or score > best[0] + 1e-9:
                 best = (score, bpm, offset)
             elif best is not None and abs(score - best[0]) <= 1e-9:
-                # Prefer a lower, conventional counting level over a false
-                # double-time candidate when the evidence score is identical.
                 if bpm < best[1]:
                     best = (score, bpm, offset)
 
