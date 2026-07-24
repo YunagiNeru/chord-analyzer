@@ -14,6 +14,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from google import genai
 from google.genai import types
 
+from music_agent.accuracy_v2_finalization import SemanticStructureRefinementDraft
 from music_agent.diagnostics import DiagnosticsRecorder
 from music_agent.model_gateway import ModelGateway
 from music_agent.schemas import CompactResolutionDraft, CompactSpecialistDraft
@@ -23,7 +24,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Probe the live Vertex AI structured-output contracts used by "
-            "Accuracy V2 specialists and resolvers."
+            "Accuracy V2 specialists, resolvers, and semantic refinement."
         )
     )
     parser.parse_args()
@@ -79,6 +80,23 @@ def main() -> int:
             retries=2,
             diagnostic_label="probe-compact-resolution",
         )
+        semantic = gateway.generate_typed(
+            contents=[
+                "Synthetic contract probe only. Split 0-32 seconds into two meaningful "
+                "song sections. The first is an instrumental intro from 0-16 seconds, "
+                "the second is a vocal verse from 16-32 seconds. Give each a distinct "
+                "name and summary."
+            ],
+            schema=SemanticStructureRefinementDraft,
+            system_instruction=(
+                "Return only semantic song-section JSON. Never use arbitrary A1/A2 names. "
+                "Every section requires a distinct summary."
+            ),
+            temperature=0.0,
+            max_output_tokens=6_144,
+            retries=2,
+            diagnostic_label="probe-semantic-refinement",
+        )
     except Exception as exc:  # noqa: BLE001 - command boundary
         print(
             json.dumps(
@@ -98,10 +116,13 @@ def main() -> int:
 
     specialist_payload = specialist.model_dump()
     resolution_payload = resolution.model_dump()
+    semantic_payload = semantic.model_dump()
     valid = (
         bool(specialist.chords)
         and specialist.chords[0].endSeconds > specialist.chords[0].startSeconds
         and resolution.chosenSymbol == "C"
+        and len(semantic.sections) >= 2
+        and len({item.summary for item in semantic.sections if item.summary}) >= 2
     )
     print(
         json.dumps(
@@ -111,6 +132,7 @@ def main() -> int:
                 "model": model,
                 "compactSpecialist": specialist_payload,
                 "compactResolution": resolution_payload,
+                "semanticRefinement": semantic_payload,
                 "diagnostics": diagnostics.build([]).model_dump(),
             },
             ensure_ascii=False,
