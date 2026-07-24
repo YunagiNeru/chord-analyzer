@@ -31,31 +31,20 @@ def _overlap(start: float, end: float, other_start: float, other_end: float) -> 
     return max(0.0, min(end, other_end) - max(start, other_start))
 
 
-def _distance_to_interval(
-    start: float,
-    end: float,
-    other_start: float,
-    other_end: float,
-) -> float:
-    if other_end < start:
-        return start - other_end
-    if other_start > end:
-        return other_start - end
-    return 0.0
-
-
 def _best_event(
     events: list[SpecialistChordDraft],
     start: float,
     end: float,
+    *,
+    max_tail_gap: float,
 ) -> SpecialistChordDraft | None:
     """Select the specialist's state for one beat slot.
 
-    Model responses sometimes encode only chord-change events or leave small gaps
-    between adjacent intervals. A chord label is a state, so a non-empty
-    specialist sequence must continue across those gaps instead of disappearing
-    from the consensus denominator. Exact overlaps remain preferred; otherwise
-    the nearest labelled interval is used deterministically.
+    Model responses sometimes encode chord changes as sparse state transitions or
+    leave small gaps between intervals. Gaps bounded by labelled events are
+    filled deterministically. Before the first and after the last event, a label
+    is extended by at most one bar so a single partial event cannot fabricate
+    confidence over an entire section.
     """
 
     if not events:
@@ -84,25 +73,29 @@ def _best_event(
             ),
         )[1]
 
-    slot_midpoint = (start + end) / 2.0
-    return min(
-        ordered,
-        key=lambda item: (
-            _distance_to_interval(
-                start,
-                end,
-                item.startSeconds,
-                item.endSeconds,
-            ),
-            abs(
-                slot_midpoint
-                - ((item.startSeconds + item.endSeconds) / 2.0)
-            ),
-            -item.confidence,
-            item.startSeconds,
-            item.symbol,
-        ),
-    )
+    previous = [item for item in ordered if item.endSeconds <= start]
+    following = [item for item in ordered if item.startSeconds >= end]
+    previous_event = previous[-1] if previous else None
+    following_event = following[0] if following else None
+
+    if previous_event is not None and following_event is not None:
+        previous_distance = start - previous_event.endSeconds
+        following_distance = following_event.startSeconds - end
+        if previous_distance <= following_distance:
+            return previous_event
+        return following_event
+
+    if previous_event is not None:
+        if start - previous_event.endSeconds <= max_tail_gap:
+            return previous_event
+        return None
+
+    if following_event is not None:
+        if following_event.startSeconds - end <= max_tail_gap:
+            return following_event
+        return None
+
+    return None
 
 
 def _best_dsp_event(
@@ -208,12 +201,18 @@ def consensus_section(
     slot_scores: list[dict[str, float]] = []
     slot_alternatives: list[list[str]] = []
     slot_primary_evidence: list[list[tuple[str, float]]] = []
+    max_tail_gap = grid.beat_duration * grid.beats_per_bar
 
     for start, end in zip(boundaries[:-1], boundaries[1:], strict=True):
         votes: dict[str, float] = defaultdict(float)
         primary_evidence: list[tuple[str, float]] = []
         for specialist in specialists:
-            event = _best_event(specialist.chords, start, end)
+            event = _best_event(
+                specialist.chords,
+                start,
+                end,
+                max_tail_gap=max_tail_gap,
+            )
             if event is None:
                 continue
             role_weight = profile.role_weights.get(specialist.role, 0.75)
