@@ -23,6 +23,12 @@ class ChordSymbolTests(unittest.TestCase):
         self.assertEqual(canonicalize_symbol("D#79b9"), "D#7b9")
         self.assertEqual(canonicalize_symbol("C713"), "C13")
 
+    def test_simplify_keeps_only_root_and_basic_quality(self) -> None:
+        self.assertEqual(canonicalize_symbol("Emaj7", simplify=True), "E")
+        self.assertEqual(canonicalize_symbol("Am7/E", simplify=True), "Am")
+        self.assertEqual(canonicalize_symbol("F#m7-5", simplify=True), "F#dim")
+        self.assertEqual(canonicalize_symbol("D#7b9/G", simplify=True), "D#")
+
     def test_components(self) -> None:
         parsed = parse_chord("Am7/E")
         self.assertEqual(parsed.root, "A")
