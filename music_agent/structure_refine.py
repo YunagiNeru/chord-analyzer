@@ -62,6 +62,11 @@ def align_sections_to_grid(
     Major section boundaries prefer a bar line when the source boundary is at
     most one beat away. Otherwise the nearest beat is used. The first and last
     boundaries remain exactly 0 and duration so coverage is never lost.
+
+    Grid-aligned values stay at microsecond precision here. Rounding them to
+    milliseconds before consensus can leave a section edge a few hundred
+    microseconds away from the corresponding beat, which creates a zero-length
+    chord slot after API timestamp rounding.
     """
 
     if not sections:
@@ -105,8 +110,8 @@ def align_sections_to_grid(
         output.append(
             section.model_copy(
                 update={
-                    "startSeconds": round(start, 3),
-                    "endSeconds": round(end, 3),
+                    "startSeconds": round(start, 6),
+                    "endSeconds": round(end, 6),
                     "type": normalise_section_type(section.type),
                 }
             )
@@ -175,8 +180,8 @@ def _make_children(
                     "id": f"{parent.id}-{suffix}" if count > 1 else parent.id,
                     "name": name,
                     "type": section_type,
-                    "startSeconds": round(start, 3),
-                    "endSeconds": round(end, 3),
+                    "startSeconds": round(start, 6),
+                    "endSeconds": round(end, 6),
                     "confidence": confidence,
                     "notes": parent.notes,
                 }
@@ -254,7 +259,7 @@ def normalise_refinement(
                 boundary = nearest_beat(grid, midpoint)
             if boundary <= boundaries[-1] + grid.beat_duration:
                 return []
-            boundaries.append(boundary)
+            boundaries.append(round(boundary, 6))
     boundaries.append(parent.endSeconds)
 
     children = _make_children(
@@ -311,7 +316,7 @@ def build_analysis_slices(
             boundary = nearest_bar(grid, proposed)
             if boundary <= cursor + bar_duration * 4:
                 boundary = proposed
-            boundaries.append(boundary)
+            boundaries.append(round(boundary, 6))
             cursor = boundary
         boundaries.append(parent.endSeconds)
         count = len(boundaries) - 1
@@ -320,8 +325,8 @@ def build_analysis_slices(
                 update={
                     "id": f"{parent.id}__slice{index + 1}",
                     "name": f"{parent.name} 分析区間{index + 1}/{count}",
-                    "startSeconds": round(start, 3),
-                    "endSeconds": round(end, 3),
+                    "startSeconds": round(start, 6),
+                    "endSeconds": round(end, 6),
                 }
             )
             output.append(
