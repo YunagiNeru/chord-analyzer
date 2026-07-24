@@ -7,11 +7,11 @@ from unittest.mock import MagicMock, patch
 
 from music_agent.pipeline_v2 import AccuracyPipelineV2
 from music_agent.schemas import (
+    CompactChordDraft,
+    CompactSpecialistDraft,
     FinalExplanationDraft,
     RhythmDraft,
     SectionStructureDraft,
-    SpecialistChordDraft,
-    SpecialistSectionDraft,
     StructureDraft,
     TempoCandidate,
     TrackStructureDraft,
@@ -62,40 +62,37 @@ class FakeGateway:
                 globalMode="major",
                 confidence=0.95,
             )
-        if schema is SpecialistSectionDraft:
+        if schema is CompactSpecialistDraft:
             prompt = json.loads(str(contents[-1]).split("\n", 1)[1])
-            role = prompt["role"]
-            return SpecialistSectionDraft(
-                sectionId="section-1",
-                role=role,
-                key="C",
-                mode="major",
+            self.assert_prompt_is_compact(prompt)
+            return CompactSpecialistDraft(
                 chords=[
-                    SpecialistChordDraft(
+                    CompactChordDraft(
                         symbol="C",
                         startSeconds=0.0,
                         endSeconds=2.0,
                         confidence=0.95,
                     ),
-                    SpecialistChordDraft(
+                    CompactChordDraft(
                         symbol="G",
                         startSeconds=2.0,
                         endSeconds=4.0,
                         confidence=0.95,
                     ),
-                    SpecialistChordDraft(
+                    CompactChordDraft(
                         symbol="Am",
                         startSeconds=4.0,
                         endSeconds=6.0,
                         confidence=0.95,
                     ),
-                    SpecialistChordDraft(
+                    CompactChordDraft(
                         symbol="F",
                         startSeconds=6.0,
                         endSeconds=8.0,
                         confidence=0.95,
                     ),
                 ],
+                repeatedPattern=["C", "G", "Am", "F"],
             )
         if schema is FinalExplanationDraft:
             return FinalExplanationDraft(
@@ -103,6 +100,13 @@ class FakeGateway:
                 sectionSummaries={"section-1": "Test section."},
             )
         raise AssertionError(f"unexpected schema: {schema}")
+
+    @staticmethod
+    def assert_prompt_is_compact(prompt: dict[str, object]) -> None:
+        output = prompt.get("output")
+        assert isinstance(output, dict)
+        assert output["noProse"] is True
+        assert "rhythm" not in prompt
 
     def generate_text(self, **_: object):
         raise AssertionError("reference research must be disabled in this test")
@@ -143,6 +147,10 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertEqual(result.track.durationSeconds, 8.0)
         self.assertEqual(result.track.bpm, 120.0)
         self.assertEqual(result.diagnostics.invariantErrors, [])
+        self.assertEqual(result.diagnostics.requiredModelFailures, [])
+        self.assertEqual(result.diagnostics.analysisSliceCount, 1)
+        self.assertEqual(result.diagnostics.chordStateCount, 4)
+        self.assertEqual(result.diagnostics.displayChordEventCount, 4)
         chords = [
             chord.symbol
             for section in result.sections
