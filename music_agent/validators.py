@@ -82,6 +82,17 @@ def normalise_section_type(value: str | None) -> str:
     return "other"
 
 
+def _same_semantic_section(
+    left: SectionStructureDraft,
+    right: SectionStructureDraft,
+) -> bool:
+    if normalise_section_type(left.type) == normalise_section_type(right.type):
+        return True
+    left_name = re.sub(r"\d+", "", (left.name or "").lower())
+    right_name = re.sub(r"\d+", "", (right.name or "").lower())
+    return bool(left_name and left_name == right_name)
+
+
 def normalise_sections(
     raw_sections: list[SectionStructureDraft],
     *,
@@ -89,6 +100,13 @@ def normalise_sections(
     max_sections: int = 12,
 ) -> list[SectionStructureDraft]:
     duration = max(0.001, _finite(duration, 0.001))
+    # A fixed cap of 12 merged Bメロ with サビ and Cメロ with 落ちサビ on
+    # ordinary three-minute songs. Scale the safe cap with duration instead.
+    effective_max_sections = max(
+        max_sections,
+        min(20, max(1, math.ceil(duration / 10.0))),
+    )
+
     candidates: list[SectionStructureDraft] = []
     for index, item in enumerate(raw_sections):
         start = _finite(item.startSeconds, -1.0)
@@ -168,14 +186,21 @@ def normalise_sections(
 
     cleaned[-1] = cleaned[-1].model_copy(update={"endSeconds": round(duration, 3)})
 
-    while len(cleaned) > max_sections:
+    while len(cleaned) > effective_max_sections:
+        compatible_pairs = [
+            index
+            for index in range(len(cleaned) - 1)
+            if _same_semantic_section(cleaned[index], cleaned[index + 1])
+        ]
+        if not compatible_pairs:
+            # Do not destroy semantically different sections merely to hit a
+            # display cap. The quality gate will reject implausibly many sections.
+            break
         merge_index = min(
-            range(len(cleaned) - 1),
+            compatible_pairs,
             key=lambda index: (
-                cleaned[index].endSeconds
-                - cleaned[index].startSeconds
-                + cleaned[index + 1].endSeconds
-                - cleaned[index + 1].startSeconds,
+                cleaned[index].endSeconds - cleaned[index].startSeconds
+                + cleaned[index + 1].endSeconds - cleaned[index + 1].startSeconds,
                 index,
             ),
         )
@@ -189,7 +214,7 @@ def normalise_sections(
                 "startSeconds": left.startSeconds,
                 "endSeconds": right.endSeconds,
                 "confidence": min(left.confidence, right.confidence),
-                "notes": "セクション数上限のため隣接区間を統合しました。",
+                "notes": "同種の隣接セクションを統合しました。",
             }
         )
         cleaned[merge_index : merge_index + 2] = [merged]
@@ -360,34 +385,43 @@ def build_section_result(
     summary: str = "",
 ) -> SectionResult:
     clean = _clean_chords(chords, section=section)
-    grouped: dict[int, list[ChordEvent]] = defaultdict(list)
-    section_key = section.key
-    for chord in clean:
-        bar = grid.bar_for_time(chord.startSeconds)
-        beat = round(grid.beat_for_time(chord.startSeconds), 2)
-        updated = chord.model_copy(
-            update={
-                "bar": bar,
-                "beat": beat,
-                "roman": roman_numeral(chord.symbol, section_key, section.mode),
-            }
-        )
-        grouped[bar].append(updated)
-
-    measures: list[Measure] = []
     bar_duration = grid.beat_duration * grid.beats_per_bar
-    for bar in sorted(grouped):
-        bar_start = grid.downbeat_offset + (bar - 1) * bar_duration
-        start = max(section.startSeconds, bar_start)
-        end = min(section.endSeconds, bar_start + bar_duration)
-        if end <= start:
-            end = min(section.endSeconds, start + bar_duration)
+    first_bar = grid.bar_for_time(section.startSeconds)
+    last_probe = max(section.startSeconds, section.endSeconds - 1e-6)
+    last_bar = grid.bar_for_time(last_probe)
+    measures: list[Measure] = []
+
+    for bar in range(first_bar, last_bar + 1):
+        raw_bar_start = grid.downbeat_offset + (bar - 1) * bar_duration
+        measure_start = max(section.startSeconds, raw_bar_start)
+        measure_end = min(section.endSeconds, raw_bar_start + bar_duration)
+        if measure_end <= measure_start:
+            continue
+
+        measure_chords: list[ChordEvent] = []
+        for chord in clean:
+            start = max(measure_start, chord.startSeconds)
+            end = min(measure_end, chord.endSeconds)
+            if end - start < 0.03:
+                continue
+            measure_chords.append(
+                chord.model_copy(
+                    update={
+                        "startSeconds": round(start, 3),
+                        "endSeconds": round(end, 3),
+                        "bar": bar,
+                        "beat": round(grid.beat_for_time(start), 2),
+                        "roman": roman_numeral(chord.symbol, section.key, section.mode),
+                    }
+                )
+            )
+
         measures.append(
             Measure(
                 bar=bar,
-                startSeconds=round(max(0.0, start), 3),
-                endSeconds=round(max(start + 0.03, end), 3),
-                chords=grouped[bar],
+                startSeconds=round(max(0.0, measure_start), 3),
+                endSeconds=round(measure_end, 3),
+                chords=measure_chords,
             )
         )
 
@@ -422,9 +456,13 @@ def validate_invariants(result: AnalysisResult) -> list[str]:
             if measure.bar < previous_bar:
                 errors.append(f"bar_not_monotonic:{measure.bar}")
             previous_bar = max(previous_bar, measure.bar)
+            if measure.startSeconds < section.startSeconds - 1e-3 or measure.endSeconds > section.endSeconds + 1e-3:
+                errors.append(f"measure_outside_section:{section.id}:{measure.bar}")
             for chord in measure.chords:
                 if chord.startSeconds < section.startSeconds - 1e-3 or chord.endSeconds > section.endSeconds + 1e-3:
                     errors.append(f"chord_outside_section:{section.id}:{chord.symbol}")
+                if chord.startSeconds < measure.startSeconds - 1e-3 or chord.endSeconds > measure.endSeconds + 1e-3:
+                    errors.append(f"chord_outside_measure:{section.id}:{measure.bar}:{chord.symbol}")
                 if chord.startSeconds < previous_chord_end - 1e-3:
                     errors.append(f"chord_overlap:{section.id}:{chord.symbol}")
                 previous_chord_end = max(previous_chord_end, chord.endSeconds)
@@ -454,6 +492,8 @@ def validate_quality(result: AnalysisResult) -> list[str]:
 
     if duration >= 90.0 and len(result.sections) < 3:
         errors.append(f"too_few_sections:{len(result.sections)}")
+    if len(result.sections) > 20:
+        errors.append(f"too_many_sections:{len(result.sections)}")
     minimum_chords = max(4, math.ceil(duration / 20.0))
     if len(chords) < minimum_chords:
         errors.append(f"too_few_chords:{len(chords)}<{minimum_chords}")
@@ -470,4 +510,19 @@ def validate_quality(result: AnalysisResult) -> list[str]:
         for section in result.sections
     ):
         errors.append("structure_fallback_present")
+    if any("セクション数上限" in section.summary for section in result.sections):
+        errors.append("semantic_sections_merged_by_limit")
+
+    if result.track.bpm and result.tempoSegments:
+        dominant = max(
+            result.tempoSegments,
+            key=lambda item: item.endSeconds - item.startSeconds,
+        )
+        coverage = (dominant.endSeconds - dominant.startSeconds) / duration if duration > 0 else 0.0
+        if coverage >= 0.8:
+            ratio = max(result.track.bpm, dominant.bpm) / min(result.track.bpm, dominant.bpm)
+            if ratio > 1.03:
+                errors.append(
+                    f"tempo_summary_mismatch:{result.track.bpm:g}!={dominant.bpm:g}"
+                )
     return sorted(set(errors))
