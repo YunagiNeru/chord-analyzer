@@ -201,10 +201,10 @@ class ResolutionDraft(ApiModel):
 
 
 class CompactResolutionDraft(ApiModel):
-    """Exactly one resolver decision; no free-form reason text."""
+    """Exactly one explicit resolver decision; no free-form reason text."""
 
-    chosenSymbol: str = "X"
-    confidence: float = 0.5
+    chosenSymbol: str
+    confidence: float
 
 
 class FinalExplanationDraft(ApiModel):
