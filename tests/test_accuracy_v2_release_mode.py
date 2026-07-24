@@ -7,6 +7,7 @@ from unittest.mock import patch
 from music_agent.accuracy_v2_release_mode import (
     _append_degraded_warnings,
     _is_fatal_quality_error,
+    _max_degraded_unresolved_ratio,
     _strict_quality_gate,
 )
 from music_agent.schemas import (
@@ -77,9 +78,23 @@ class AccuracyV2ReleaseModeTests(unittest.TestCase):
             os.environ.pop("STRICT_QUALITY_GATE", None)
             self.assertTrue(_strict_quality_gate())
 
+    def test_degraded_uncertainty_limit_is_bounded(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"MAX_DEGRADED_UNRESOLVED_RATIO": "0.40"},
+            clear=False,
+        ):
+            self.assertEqual(_max_degraded_unresolved_ratio(), 0.40)
+        with patch.dict(
+            os.environ,
+            {"MAX_DEGRADED_UNRESOLVED_RATIO": "9"},
+            clear=False,
+        ):
+            self.assertEqual(_max_degraded_unresolved_ratio(), 0.60)
+
     def test_only_resolver_degradation_is_fail_soft(self) -> None:
         self.assertFalse(
-            _is_fatal_quality_error("excessive_unresolved_coverage:0.452")
+            _is_fatal_quality_error("excessive_unresolved_coverage:0.352")
         )
         self.assertFalse(
             _is_fatal_quality_error(
