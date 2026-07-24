@@ -156,7 +156,7 @@ def main() -> int:
     os.environ.setdefault("GEMINI_MODEL", "gemini-3.5-flash")
     os.environ.setdefault("GEMINI_RESOLVER_MODEL", os.environ["GEMINI_MODEL"])
     os.environ.setdefault("MODEL_MAX_PARALLEL_CALLS", "4")
-    os.environ.setdefault("MAX_RESOLVER_CALLS", "4")
+    os.environ.setdefault("MAX_RESOLVER_CALLS", "12")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
