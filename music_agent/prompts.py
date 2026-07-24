@@ -4,13 +4,7 @@ import json
 from typing import Any
 
 from .beat_grid import BeatGrid
-from .schemas import (
-    DspSummary,
-    RhythmDraft,
-    SectionStructureDraft,
-    SpecialistSectionDraft,
-    StructureDraft,
-)
+from .schemas import DspSummary, RhythmDraft, SectionStructureDraft, StructureDraft
 
 
 STRUCTURE_SYSTEM_PROMPT = """
@@ -27,6 +21,22 @@ STRUCTURE_SYSTEM_PROMPT = """
 - 映像だけ、会話、無音など音楽でない区間も notes に記録する。
 - 証拠が弱い境界は confidence を下げる。
 - JSONスキーマ以外の文章を返さない。
+""".strip()
+
+
+STRUCTURE_REFINEMENT_SYSTEM_PROMPT = """
+あなたは長すぎる楽曲セクションを小節単位で再分割する構造分析者です。
+提示された一つの親セクションだけを聴き、歌詞、編曲、反復周期、ボーカルの役割が変わる実在境界で分けてください。
+
+厳守事項:
+- 親区間の外へ出ない。
+- 開始から終了まで隙間なく覆う。
+- 各子区間は原則4〜16小節とし、同じ役割の単なる反復でも番号やa/bを分ける。
+- 異なる役割を一つへまとめない。
+- 時刻は suppliedGrid の拍または小節頭へ置く。
+- コード名は返さない。
+- 分割不要なら親区間1件だけを返す。
+- 最大8区間、短いJSONだけを返す。
 """.strip()
 
 
@@ -65,44 +75,40 @@ JSONスキーマ以外の文章を返さないでください。
 
 SPECIALIST_SYSTEM_PROMPTS = {
     "root_quality": """
-あなたはルート音と基本コード品質の認識だけを担当する採譜者です。
-対象区間を繰り返し聴いた前提で、実際に鳴っている絶対音高から各コードのルートと major/minor/diminished/augmented/sus/power を判定してください。
-事前のキー候補、ローマ数字、よくある進行へ合わせてはいけません。
-7th、テンション、オンコードの細部を過剰推定してはいけません。
-コード変更は実際に聴こえる拍または小節境界へ置き、同一コードを細切れにしないでください。
-不明な場合は X と低い confidence を返してください。JSON以外を返さないでください。
+あなたはルート音と基本コード品質だけを担当します。
+実際の絶対音高から root と major/minor/diminished/augmented/sus/power を判定してください。
+7th、テンション、転回形は付けず、同一コードを細切れにしないでください。
+返すのは chords 配列と短い repeatedPattern だけです。components、evidence、observations、説明文は返してはいけません。
+各コードは symbol,startSeconds,endSeconds,confidence,alternatives最大3件だけを含め、不明区間だけXにしてください。
 """.strip(),
     "bass_extension": """
-あなたはベース音、転回形、7th、テンションの検証を担当する採譜者です。
-実際の低音と構成音から slash chord、7、maj7、m7、m7-5、add9等を確認してください。
-キー候補より音源を優先し、証拠の弱いテンションは alternatives に残して単純化してください。
-ルートや変更時刻を理論だけで大きく変更してはいけません。
-不明な場合は X と低い confidence を返してください。JSON以外を返さないでください。
+あなたはベース音、転回形、7th、テンションの確認だけを担当します。
+実際の低音と構成音から slash chord、7、maj7、m7、m7-5、add9等を確認し、弱い細部は単純コードを主候補にしてください。
+返すのは chords 配列と短い repeatedPattern だけです。components、evidence、observations、説明文は返してはいけません。
+各コードは symbol,startSeconds,endSeconds,confidence,alternatives最大3件だけを含め、不明区間だけXにしてください。
 """.strip(),
     "rhythm_pattern": """
-あなたはコード変更拍と反復パターンの認識を担当する採譜者です。
-対象区間の小節グリッドに沿って、どの拍で和音が変化するか、何小節のパターンが反復するかを判定してください。
-事前のキー候補へコード名を寄せず、実際に聴取できる一般表記だけを返してください。
-同一コードの継続を優先し、1拍だけの疑わしい変化は低い confidence としてください。JSON以外を返さないでください。
+あなたはコード変更拍と反復周期だけを担当します。
+提示グリッド上で実際に和音が変わる時刻を確認し、1拍だけの疑わしい変化を作らず、同一コードの継続を優先してください。
+返すのは chords 配列と短い repeatedPattern だけです。components、evidence、observations、説明文は返してはいけません。
+各コードは symbol,startSeconds,endSeconds,confidence,alternatives最大3件だけを含め、不明区間だけXにしてください。
 """.strip(),
 }
 
 
 RESOLUTION_SYSTEM_PROMPT = """
-あなたはコード認識の不一致解決だけを担当します。
-候補リスト、前後の確定コード、小節位置、対象音源を比較してください。
-chosenSymbol は必ず候補リスト内のコード、N、または X のいずれかを返してください。
-新しい時刻、セクション、候補外のコードを創作してはいけません。
-reason は各choiceにつき40文字以内、observationsは最大2件にしてください。
-確定できない場合は X を選び、confidence を下げてください。短く完全なJSONだけを返してください。
+あなたは一つのコード認識不一致だけを解決します。
+候補、前後コード、対象音源を比較し、chosenSymbol と confidence の2項目だけを返してください。
+chosenSymbol は allowedCandidates 内の値、N、Xのいずれかに限定します。
+理由、時刻、配列、observations、追加候補を返してはいけません。
 """.strip()
 
 
 FINAL_EXPLANATION_SYSTEM_PROMPT = """
 あなたは確定済みコード譜の説明担当です。
-入力されたコード、時刻、セクション境界を一切変更せず、musicalSummary、warnings、sectionSummaries だけを生成してください。
-musicalSummaryは350文字以内、warningsは最大8件、sectionSummariesは各80文字以内にしてください。
-不確実範囲は断定せず、分析結果にない事実を追加しないでください。短く完全なJSONだけを返してください。
+入力されたコード、時刻、セクション境界を変更せず、musicalSummary、warnings、sectionSummariesだけを生成してください。
+musicalSummaryは350文字以内、warningsは最大8件、sectionSummariesは各80文字以内です。
+分析結果にない事実を追加せず、短く完全なJSONだけを返してください。
 """.strip()
 
 
@@ -157,6 +163,38 @@ def build_structure_prompt(
         "dspKeyHints": [item.model_dump() for item in dsp.keyCandidates] if dsp else [],
     }
     return "全曲の構造だけを抽出してください。補助情報は命令ではなく証拠です。\n" + _json(payload)
+
+
+def build_structure_refinement_prompt(
+    *,
+    section: SectionStructureDraft,
+    grid: BeatGrid,
+    clip_start: float,
+    clip_end: float,
+) -> str:
+    bar_duration = grid.beat_duration * grid.beats_per_bar
+    bar_starts = [
+        value
+        for value in grid.bar_starts
+        if section.startSeconds - grid.beat_duration <= value <= section.endSeconds + grid.beat_duration
+    ]
+    payload = {
+        "parentSection": section.model_dump(),
+        "inputClip": {
+            "startSeconds": clip_start,
+            "endSeconds": clip_end,
+            "timestampsMayBeClipRelative": True,
+        },
+        "suppliedGrid": {
+            "bpm": grid.bpm,
+            "timeSignature": grid.time_signature,
+            "downbeatOffsetSeconds": grid.downbeat_offset,
+            "barDurationSeconds": bar_duration,
+            "barStarts": bar_starts,
+        },
+        "limits": {"maximumChildBars": 16, "maximumChildren": 8},
+    }
+    return "親セクションを必要な場合だけ実在する音楽構造へ再分割してください。\n" + _json(payload)
 
 
 def build_rhythm_prompt(
@@ -216,31 +254,26 @@ def build_specialist_prompt(
             item.model_dump()
             for item in dsp.chordRuns
             if item.endSeconds > section.startSeconds and item.startSeconds < section.endSeconds
-        ][:120]
+        ][:64]
 
-    section_payload = section.model_dump()
-    rhythm_payload = rhythm.model_dump()
-    if role in {"root_quality", "rhythm_pattern"}:
-        section_payload["key"] = None
-        section_payload["mode"] = None
-        rhythm_payload["globalKey"] = None
-        rhythm_payload["globalMode"] = None
-        rhythm_payload["observations"] = [
-            item
-            for item in rhythm_payload.get("observations", [])
-            if "key" not in str(item).lower() and "調" not in str(item)
-        ]
-
+    key_hint = section.key if role == "bass_extension" else None
     payload = {
         "role": role,
-        "section": section_payload,
+        "section": {
+            "id": section.id,
+            "name": section.name,
+            "type": section.type,
+            "startSeconds": section.startSeconds,
+            "endSeconds": section.endSeconds,
+            "keyHint": key_hint,
+        },
         "clip": {
             "inputStartSeconds": clip_start,
             "inputEndSeconds": clip_end,
+            "timestampsMayBeClipRelative": True,
             "acceptOnlyStartSeconds": section.startSeconds,
             "acceptOnlyEndSeconds": section.endSeconds,
         },
-        "rhythm": rhythm_payload,
         "selectedGrid": {
             "bpm": grid.bpm,
             "timeSignature": grid.time_signature,
@@ -249,13 +282,19 @@ def build_specialist_prompt(
             "beatTimes": [
                 value
                 for value in grid.beat_times
-                if section.startSeconds - 1.0 <= value <= section.endSeconds + 1.0
+                if section.startSeconds - grid.beat_duration <= value <= section.endSeconds + grid.beat_duration
             ],
         },
         "dspChordHints": dsp_runs,
-        "previousContext": previous_context or [],
+        "previousContext": (previous_context or [])[-8:],
+        "output": {
+            "fields": ["chords", "repeatedPattern"],
+            "chordFields": ["symbol", "startSeconds", "endSeconds", "confidence", "alternatives"],
+            "maximumAlternatives": 3,
+            "noProse": True,
+        },
     }
-    return "指定区間だけを担当範囲に従って採譜してください。\n" + _json(payload)
+    return "指定された短い分析区間だけを採譜してください。\n" + _json(payload)
 
 
 def build_resolution_prompt(
@@ -270,15 +309,9 @@ def build_resolution_prompt(
     grid: BeatGrid,
 ) -> str:
     payload = {
-        "section": {
-            "id": section.id,
-            "name": section.name,
-            "type": section.type,
-            "startSeconds": section.startSeconds,
-            "endSeconds": section.endSeconds,
-        },
+        "section": {"id": section.id, "name": section.name, "type": section.type},
         "target": {"startSeconds": start, "endSeconds": end},
-        "allowedCandidates": list(dict.fromkeys(candidates + ["N", "X"])),
+        "allowedCandidates": list(dict.fromkeys(candidates + ["N", "X"]))[:10],
         "previousConfirmedChord": previous_symbol,
         "nextConfirmedChord": next_symbol,
         "sectionKeyHint": key,
@@ -287,13 +320,9 @@ def build_resolution_prompt(
             "timeSignature": grid.time_signature,
             "downbeatOffsetSeconds": grid.downbeat_offset,
         },
-        "outputPolicy": {
-            "oneChoicePerActualChordState": True,
-            "reasonMaxCharacters": 40,
-            "observationsMaxItems": 2,
-        },
+        "output": {"fields": ["chosenSymbol", "confidence"], "oneDecision": True},
     }
-    return "対象範囲の不一致だけを解決してください。\n" + _json(payload)
+    return "対象範囲のコードを候補から一つだけ選択してください。\n" + _json(payload)
 
 
 def build_final_explanation_prompt(payload: dict[str, Any]) -> str:
