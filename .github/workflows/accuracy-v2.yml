@@ -11,6 +11,9 @@ on:
       - "requirements.txt"
       - "scripts/**"
       - "tests/**"
+      - "deploy.sh"
+      - "Dockerfile"
+      - ".gcloudignore"
       - ".github/workflows/accuracy-v2.yml"
 
 permissions:
@@ -45,7 +48,13 @@ jobs:
       - name: Test structure refinement
         run: python -m unittest tests.test_structure_refine -v
       - name: Test final Accuracy V2 reconciliation
-        run: python -m unittest tests.test_accuracy_v2_finalization -v
+        run: |
+          python -m unittest tests.test_accuracy_v2_finalization -v
+          python -m unittest tests.test_accuracy_v2_finalization_v2 -v
+      - name: Test resolver recovery and production mode
+        run: |
+          python -m unittest tests.test_accuracy_v2_resolver_recovery -v
+          python -m unittest tests.test_accuracy_v2_release_mode -v
       - name: Test release recovery regressions
         run: python -m unittest tests.test_accuracy_v2_release_recovery -v
       - name: Test static-section quality gate
