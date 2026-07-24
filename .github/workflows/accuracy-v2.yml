@@ -60,6 +60,8 @@ jobs:
         run: python -m unittest tests.test_model_output_recovery -v
       - name: Test reference research
         run: python -m unittest tests.test_reference_research -v
+      - name: Test reference attribution
+        run: python -m unittest tests.test_reference_attribution -v
       - name: Test script entrypoints
         run: python -m unittest tests.test_script_entrypoints -v
       - name: Test API compatibility
