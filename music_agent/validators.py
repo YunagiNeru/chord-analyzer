@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import math
 import re
-from collections import defaultdict
 
 from .beat_grid import BeatGrid
 from .chord_symbol import canonicalize_note, canonicalize_symbol, parse_chord
 from .schemas import (
     AnalysisResult,
     ChordEvent,
+    CompactSpecialistDraft,
     Measure,
     ResolutionDraft,
     SectionResult,
@@ -50,6 +50,7 @@ SECTION_TYPE_ALIASES = {
     "postchorus": "post_chorus",
     "post-chorus": "post_chorus",
 }
+_MAJOR_SECTION_TYPES = {"verse", "pre_chorus", "chorus", "post_chorus"}
 
 
 def _finite(value: object, default: float) -> float:
@@ -79,34 +80,23 @@ def normalise_section_type(value: str | None) -> str:
         return "intro"
     if "outro" in token:
         return "outro"
+    if "bridge" in token:
+        return "bridge"
+    if "interlude" in token:
+        return "interlude"
     return "other"
-
-
-def _same_semantic_section(
-    left: SectionStructureDraft,
-    right: SectionStructureDraft,
-) -> bool:
-    if normalise_section_type(left.type) == normalise_section_type(right.type):
-        return True
-    left_name = re.sub(r"\d+", "", (left.name or "").lower())
-    right_name = re.sub(r"\d+", "", (right.name or "").lower())
-    return bool(left_name and left_name == right_name)
 
 
 def normalise_sections(
     raw_sections: list[SectionStructureDraft],
     *,
     duration: float,
-    max_sections: int = 12,
+    max_sections: int = 20,
 ) -> list[SectionStructureDraft]:
-    duration = max(0.001, _finite(duration, 0.001))
-    # A fixed cap of 12 merged Bメロ with サビ and Cメロ with 落ちサビ on
-    # ordinary three-minute songs. Scale the safe cap with duration instead.
-    effective_max_sections = max(
-        max_sections,
-        min(20, max(1, math.ceil(duration / 10.0))),
-    )
+    """Sanitise structure without merging semantically distinct sections."""
 
+    del max_sections  # retained for API compatibility; quality gates own the cap.
+    duration = max(0.001, _finite(duration, 0.001))
     candidates: list[SectionStructureDraft] = []
     for index, item in enumerate(raw_sections):
         start = _finite(item.startSeconds, -1.0)
@@ -117,13 +107,11 @@ def normalise_sections(
         end = max(start + 0.25, min(duration, end))
         if end <= start:
             continue
-        section_id = (item.id or "").strip() or f"section-{index + 1}"
-        name = (item.name or "").strip() or f"セクション{index + 1}"
         candidates.append(
             item.model_copy(
                 update={
-                    "id": section_id,
-                    "name": name,
+                    "id": (item.id or "").strip() or f"section-{index + 1}",
+                    "name": (item.name or "").strip() or f"セクション{index + 1}",
                     "type": normalise_section_type(item.type),
                     "startSeconds": round(start, 3),
                     "endSeconds": round(end, 3),
@@ -148,15 +136,12 @@ def normalise_sections(
             if previous_end > previous.startSeconds:
                 cleaned[-1] = previous.model_copy(update={"endSeconds": round(previous_end, 3)})
             start = cleaned[-1].endSeconds
-        if end - start < 0.25:
-            continue
-        cleaned.append(item.model_copy(update={"startSeconds": round(start, 3), "endSeconds": round(end, 3)}))
+        if end - start >= 0.25:
+            cleaned.append(item.model_copy(update={"startSeconds": round(start, 3), "endSeconds": round(end, 3)}))
 
     if not cleaned:
         return []
-
-    first = cleaned[0]
-    if first.startSeconds > 0.25:
+    if cleaned[0].startSeconds > 0.25:
         cleaned.insert(
             0,
             SectionStructureDraft(
@@ -164,70 +149,57 @@ def normalise_sections(
                 name="冒頭",
                 type="intro",
                 startSeconds=0.0,
-                endSeconds=first.startSeconds,
+                endSeconds=cleaned[0].startSeconds,
                 confidence=0.35,
                 notes="先頭の未分類区間です。",
             ),
         )
     else:
-        cleaned[0] = first.model_copy(update={"startSeconds": 0.0})
+        cleaned[0] = cleaned[0].model_copy(update={"startSeconds": 0.0})
 
     for index in range(len(cleaned) - 1):
         current = cleaned[index]
         following = cleaned[index + 1]
         if following.startSeconds - current.endSeconds > 0.25:
-            midpoint = (current.endSeconds + following.startSeconds) / 2.0
-            cleaned[index] = current.model_copy(update={"endSeconds": round(midpoint, 3)})
-            cleaned[index + 1] = following.model_copy(update={"startSeconds": round(midpoint, 3)})
+            boundary = (current.endSeconds + following.startSeconds) / 2.0
         else:
             boundary = max(current.startSeconds + 0.25, following.startSeconds)
-            cleaned[index] = current.model_copy(update={"endSeconds": round(boundary, 3)})
-            cleaned[index + 1] = following.model_copy(update={"startSeconds": round(boundary, 3)})
-
+        cleaned[index] = current.model_copy(update={"endSeconds": round(boundary, 3)})
+        cleaned[index + 1] = following.model_copy(update={"startSeconds": round(boundary, 3)})
     cleaned[-1] = cleaned[-1].model_copy(update={"endSeconds": round(duration, 3)})
-
-    while len(cleaned) > effective_max_sections:
-        compatible_pairs = [
-            index
-            for index in range(len(cleaned) - 1)
-            if _same_semantic_section(cleaned[index], cleaned[index + 1])
-        ]
-        if not compatible_pairs:
-            # Do not destroy semantically different sections merely to hit a
-            # display cap. The quality gate will reject implausibly many sections.
-            break
-        merge_index = min(
-            compatible_pairs,
-            key=lambda index: (
-                cleaned[index].endSeconds - cleaned[index].startSeconds
-                + cleaned[index + 1].endSeconds - cleaned[index + 1].startSeconds,
-                index,
-            ),
-        )
-        left = cleaned[merge_index]
-        right = cleaned[merge_index + 1]
-        preferred = left if left.confidence >= right.confidence else right
-        merged = preferred.model_copy(
-            update={
-                "id": f"{left.id}+{right.id}",
-                "name": f"{left.name}〜{right.name}",
-                "startSeconds": left.startSeconds,
-                "endSeconds": right.endSeconds,
-                "confidence": min(left.confidence, right.confidence),
-                "notes": "同種の隣接セクションを統合しました。",
-            }
-        )
-        cleaned[merge_index : merge_index + 2] = [merged]
 
     seen: set[str] = set()
     output: list[SectionStructureDraft] = []
     for index, item in enumerate(cleaned, start=1):
-        section_id = item.id
-        if section_id in seen:
-            section_id = f"{section_id}-{index}"
+        section_id = item.id if item.id not in seen else f"{item.id}-{index}"
         seen.add(section_id)
         output.append(item.model_copy(update={"id": section_id}))
     return output
+
+
+def compact_to_specialist(
+    result: CompactSpecialistDraft,
+    *,
+    section: SectionStructureDraft,
+    role: str,
+) -> SpecialistSectionDraft:
+    return SpecialistSectionDraft(
+        sectionId=section.id,
+        role=role,
+        key=section.key,
+        mode=section.mode,
+        repeatedPattern=result.repeatedPattern[:16],
+        chords=[
+            SpecialistChordDraft(
+                symbol=item.symbol,
+                startSeconds=item.startSeconds,
+                endSeconds=item.endSeconds,
+                confidence=item.confidence,
+                alternatives=item.alternatives[:3],
+            )
+            for item in result.chords[:96]
+        ],
+    )
 
 
 def normalise_specialist_result(
@@ -274,7 +246,8 @@ def normalise_specialist_result(
                     "startSeconds": round(start, 3),
                     "endSeconds": round(end, 3),
                     "confidence": _confidence(item.confidence),
-                    "alternatives": list(dict.fromkeys(alternatives))[:5],
+                    "alternatives": list(dict.fromkeys(alternatives))[:3],
+                    "evidence": "",
                 }
             )
         )
@@ -286,6 +259,7 @@ def normalise_specialist_result(
             "key": result.key or section.key,
             "mode": result.mode or section.mode,
             "chords": chords,
+            "observations": [],
         }
     )
 
@@ -343,6 +317,18 @@ def roman_numeral(symbol: str, key: str | None, mode: str | None) -> str | None:
     return roman
 
 
+def _unknown_event(start: float, end: float, source: str = "ai") -> ChordEvent:
+    return ChordEvent(
+        symbol="X",
+        startSeconds=round(start, 3),
+        endSeconds=round(end, 3),
+        confidence=0.05,
+        source=source,
+        alternatives=[],
+        agreement=0.0,
+    )
+
+
 def _clean_chords(
     chords: list[ChordEvent],
     *,
@@ -350,8 +336,13 @@ def _clean_chords(
 ) -> list[ChordEvent]:
     output: list[ChordEvent] = []
     cursor = section.startSeconds
+    source = chords[0].source if chords else "ai"
     for chord in sorted(chords, key=lambda item: (item.startSeconds, item.endSeconds, item.symbol)):
-        start = max(section.startSeconds, cursor, float(chord.startSeconds))
+        raw_start = max(section.startSeconds, float(chord.startSeconds))
+        if raw_start > cursor + 0.03:
+            output.append(_unknown_event(cursor, raw_start, source))
+            cursor = raw_start
+        start = max(section.startSeconds, cursor, raw_start)
         end = min(section.endSeconds, float(chord.endSeconds))
         if end - start < 0.03:
             continue
@@ -373,7 +364,42 @@ def _clean_chords(
         else:
             output.append(clean)
         cursor = output[-1].endSeconds
+    if cursor < section.endSeconds - 0.03:
+        output.append(_unknown_event(cursor, section.endSeconds, source))
+    if not output:
+        output.append(_unknown_event(section.startSeconds, section.endSeconds, source))
     return output
+
+
+def _bar_duration(grid: BeatGrid) -> float:
+    return grid.beat_duration * grid.beats_per_bar
+
+
+def _bar_for_time(grid: BeatGrid, seconds: float) -> int:
+    bar_duration = _bar_duration(grid)
+    if grid.downbeat_offset > 1e-6:
+        if seconds < grid.downbeat_offset - 1e-6:
+            return 1
+        return int(math.floor((seconds - grid.downbeat_offset) / bar_duration)) + 2
+    return int(math.floor(max(0.0, seconds) / bar_duration)) + 1
+
+
+def _bar_bounds(grid: BeatGrid, bar: int) -> tuple[float, float]:
+    bar_duration = _bar_duration(grid)
+    if grid.downbeat_offset > 1e-6:
+        if bar == 1:
+            return 0.0, grid.downbeat_offset
+        start = grid.downbeat_offset + (bar - 2) * bar_duration
+        return start, start + bar_duration
+    start = (bar - 1) * bar_duration
+    return start, start + bar_duration
+
+
+def _beat_for_time(grid: BeatGrid, seconds: float) -> float:
+    bar = _bar_for_time(grid, seconds)
+    start, _ = _bar_bounds(grid, bar)
+    value = ((seconds - start) / grid.beat_duration) + 1.0
+    return max(1.0, min(float(grid.beats_per_bar), value))
 
 
 def build_section_result(
@@ -385,19 +411,17 @@ def build_section_result(
     summary: str = "",
 ) -> SectionResult:
     clean = _clean_chords(chords, section=section)
-    bar_duration = grid.beat_duration * grid.beats_per_bar
-    first_bar = grid.bar_for_time(section.startSeconds)
+    first_bar = _bar_for_time(grid, section.startSeconds)
     last_probe = max(section.startSeconds, section.endSeconds - 1e-6)
-    last_bar = grid.bar_for_time(last_probe)
+    last_bar = _bar_for_time(grid, last_probe)
     measures: list[Measure] = []
 
     for bar in range(first_bar, last_bar + 1):
-        raw_bar_start = grid.downbeat_offset + (bar - 1) * bar_duration
-        measure_start = max(section.startSeconds, raw_bar_start)
-        measure_end = min(section.endSeconds, raw_bar_start + bar_duration)
-        if measure_end <= measure_start:
+        raw_start, raw_end = _bar_bounds(grid, bar)
+        measure_start = max(section.startSeconds, raw_start)
+        measure_end = min(section.endSeconds, raw_end)
+        if measure_end - measure_start < 0.03:
             continue
-
         measure_chords: list[ChordEvent] = []
         for chord in clean:
             start = max(measure_start, chord.startSeconds)
@@ -410,12 +434,11 @@ def build_section_result(
                         "startSeconds": round(start, 3),
                         "endSeconds": round(end, 3),
                         "bar": bar,
-                        "beat": round(grid.beat_for_time(start), 2),
+                        "beat": round(_beat_for_time(grid, start), 2),
                         "roman": roman_numeral(chord.symbol, section.key, section.mode),
                     }
                 )
             )
-
         measures.append(
             Measure(
                 bar=bar,
@@ -440,6 +463,27 @@ def build_section_result(
     )
 
 
+def _coverage_gaps(
+    intervals: list[tuple[float, float]],
+    *,
+    start: float,
+    end: float,
+    tolerance: float = 0.035,
+) -> list[tuple[float, float]]:
+    gaps: list[tuple[float, float]] = []
+    cursor = start
+    for interval_start, interval_end in sorted(intervals):
+        if interval_end <= cursor + tolerance:
+            cursor = max(cursor, interval_end)
+            continue
+        if interval_start > cursor + tolerance:
+            gaps.append((cursor, interval_start))
+        cursor = max(cursor, interval_end)
+    if cursor < end - tolerance:
+        gaps.append((cursor, end))
+    return gaps
+
+
 def validate_invariants(result: AnalysisResult) -> list[str]:
     errors: list[str] = []
     duration = result.track.durationSeconds
@@ -450,7 +494,19 @@ def validate_invariants(result: AnalysisResult) -> list[str]:
             errors.append(f"section_out_of_range:{section.id}")
         if section.startSeconds < previous_section_end - 1e-3:
             errors.append(f"section_overlap:{section.id}")
+        if section.startSeconds > previous_section_end + 0.035:
+            errors.append(f"section_gap:{previous_section_end:.3f}-{section.startSeconds:.3f}")
         previous_section_end = max(previous_section_end, section.endSeconds)
+
+        measure_intervals = [(item.startSeconds, item.endSeconds) for item in section.measures]
+        for gap_start, gap_end in _coverage_gaps(
+            measure_intervals,
+            start=section.startSeconds,
+            end=section.endSeconds,
+        ):
+            errors.append(f"measure_uncovered:{section.id}:{gap_start:.3f}-{gap_end:.3f}")
+
+        chord_intervals: list[tuple[float, float]] = []
         previous_chord_end = section.startSeconds
         for measure in section.measures:
             if measure.bar < previous_bar:
@@ -459,6 +515,7 @@ def validate_invariants(result: AnalysisResult) -> list[str]:
             if measure.startSeconds < section.startSeconds - 1e-3 or measure.endSeconds > section.endSeconds + 1e-3:
                 errors.append(f"measure_outside_section:{section.id}:{measure.bar}")
             for chord in measure.chords:
+                chord_intervals.append((chord.startSeconds, chord.endSeconds))
                 if chord.startSeconds < section.startSeconds - 1e-3 or chord.endSeconds > section.endSeconds + 1e-3:
                     errors.append(f"chord_outside_section:{section.id}:{chord.symbol}")
                 if chord.startSeconds < measure.startSeconds - 1e-3 or chord.endSeconds > measure.endSeconds + 1e-3:
@@ -470,7 +527,23 @@ def validate_invariants(result: AnalysisResult) -> list[str]:
                     errors.append(f"invalid_beat:{section.id}:{chord.beat}")
                 if not math.isfinite(chord.startSeconds) or not math.isfinite(chord.endSeconds):
                     errors.append(f"non_finite_time:{section.id}")
+        for gap_start, gap_end in _coverage_gaps(
+            chord_intervals,
+            start=section.startSeconds,
+            end=section.endSeconds,
+        ):
+            errors.append(f"chord_uncovered:{section.id}:{gap_start:.3f}-{gap_end:.3f}")
+    if previous_section_end < duration - 0.035:
+        errors.append(f"section_gap:{previous_section_end:.3f}-{duration:.3f}")
     return sorted(set(errors))
+
+
+def _boundary_distance_beats(result: AnalysisResult, seconds: float) -> float:
+    bpm = result.track.bpm or 120.0
+    beat_duration = 60.0 / bpm
+    offset = result.downbeatOffsetSeconds or 0.0
+    phase = ((seconds - offset) / beat_duration) % 1.0
+    return min(phase, 1.0 - phase)
 
 
 def validate_quality(result: AnalysisResult) -> list[str]:
@@ -513,16 +586,25 @@ def validate_quality(result: AnalysisResult) -> list[str]:
     if any("セクション数上限" in section.summary for section in result.sections):
         errors.append("semantic_sections_merged_by_limit")
 
+    bpm = result.track.bpm or 120.0
+    beats = 4
+    match = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", result.track.timeSignature or "4/4")
+    if match:
+        beats = max(1, int(match.group(1)))
+    bar_duration = (60.0 / bpm) * beats
+    for section in result.sections:
+        max_bars = 16 if section.type in _MAJOR_SECTION_TYPES else 20
+        section_bars = (section.endSeconds - section.startSeconds) / bar_duration
+        if section_bars > max_bars + 0.35:
+            errors.append(f"oversized_section:{section.id}:{section_bars:.2f}>{max_bars}")
+        if section.startSeconds > 0.035 and _boundary_distance_beats(result, section.startSeconds) > 0.18:
+            errors.append(f"section_boundary_off_beat:{section.id}:{section.startSeconds:.3f}")
+
     if result.track.bpm and result.tempoSegments:
-        dominant = max(
-            result.tempoSegments,
-            key=lambda item: item.endSeconds - item.startSeconds,
-        )
+        dominant = max(result.tempoSegments, key=lambda item: item.endSeconds - item.startSeconds)
         coverage = (dominant.endSeconds - dominant.startSeconds) / duration if duration > 0 else 0.0
         if coverage >= 0.8:
             ratio = max(result.track.bpm, dominant.bpm) / min(result.track.bpm, dominant.bpm)
             if ratio > 1.03:
-                errors.append(
-                    f"tempo_summary_mismatch:{result.track.bpm:g}!={dominant.bpm:g}"
-                )
+                errors.append(f"tempo_summary_mismatch:{result.track.bpm:g}!={dominant.bpm:g}")
     return sorted(set(errors))
