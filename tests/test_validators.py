@@ -3,8 +3,22 @@ from __future__ import annotations
 import unittest
 
 from music_agent.beat_grid import BeatGrid
-from music_agent.schemas import ChordEvent, SectionStructureDraft
-from music_agent.validators import build_section_result, normalise_sections, roman_numeral
+from music_agent.schemas import (
+    AnalysisResult,
+    ChordEvent,
+    Measure,
+    SectionResult,
+    SectionStructureDraft,
+    TempoSegment,
+    TrackResult,
+)
+from music_agent.validators import (
+    build_section_result,
+    normalise_sections,
+    roman_numeral,
+    validate_invariants,
+    validate_quality,
+)
 
 
 class ValidatorTests(unittest.TestCase):
@@ -70,7 +84,7 @@ class ValidatorTests(unittest.TestCase):
         self.assertEqual(sections[12].type, "chorus")
         self.assertNotIn("セクション数上限", " ".join(item.notes for item in sections))
 
-    def test_measure_assignment_uses_downbeat(self) -> None:
+    def test_pickup_region_is_preserved_as_unknown_measure(self) -> None:
         grid = BeatGrid(
             bpm=120.0,
             time_signature="4/4",
@@ -86,7 +100,7 @@ class ValidatorTests(unittest.TestCase):
             id="a",
             name="A",
             type="verse",
-            startSeconds=0.5,
+            startSeconds=0.0,
             endSeconds=4.5,
             key="C",
             mode="major",
@@ -112,16 +126,16 @@ class ValidatorTests(unittest.TestCase):
             grid=grid,
             agreement=0.9,
         )
-        self.assertEqual([measure.bar for measure in result.measures], [1, 2])
-        self.assertEqual(result.measures[0].chords[0].beat, 1.0)
-        self.assertTrue(
-            all(
-                chord.startSeconds >= measure.startSeconds
-                and chord.endSeconds <= measure.endSeconds
-                for measure in result.measures
-                for chord in measure.chords
-            )
+
+        self.assertEqual([measure.bar for measure in result.measures], [1, 2, 3])
+        self.assertEqual(
+            [chord.symbol for measure in result.measures for chord in measure.chords],
+            ["X", "C", "G"],
         )
+        self.assertEqual(result.measures[0].startSeconds, 0.0)
+        self.assertEqual(result.measures[0].endSeconds, 0.5)
+        self.assertEqual(result.measures[0].chords[0].startSeconds, 0.0)
+        self.assertEqual(result.measures[0].chords[0].endSeconds, 0.5)
 
     def test_long_chord_is_split_at_measure_boundaries(self) -> None:
         grid = BeatGrid(
@@ -163,6 +177,107 @@ class ValidatorTests(unittest.TestCase):
             [chord.symbol for measure in result.measures for chord in measure.chords],
             ["Cmaj7", "Cmaj7"],
         )
+
+    def test_invariant_detects_uncovered_measure_and_chord_time(self) -> None:
+        result = AnalysisResult(
+            track=TrackResult(durationSeconds=4.0, bpm=120.0, timeSignature="4/4"),
+            sections=[
+                SectionResult(
+                    id="broken",
+                    name="Broken",
+                    type="intro",
+                    startSeconds=0.0,
+                    endSeconds=4.0,
+                    measures=[
+                        Measure(
+                            bar=1,
+                            startSeconds=0.5,
+                            endSeconds=4.0,
+                            chords=[
+                                ChordEvent(
+                                    symbol="C",
+                                    startSeconds=1.0,
+                                    endSeconds=4.0,
+                                    source="ai",
+                                )
+                            ],
+                        )
+                    ],
+                )
+            ],
+            sourceType="youtube",
+            sourceLabel="test",
+            analysisMethod="ai_only",
+        )
+        errors = validate_invariants(result)
+        self.assertTrue(any(item.startswith("measure_uncovered") for item in errors))
+        self.assertTrue(any(item.startswith("chord_uncovered") for item in errors))
+
+    def test_quality_detects_oversized_and_offbeat_sections(self) -> None:
+        result = AnalysisResult(
+            track=TrackResult(durationSeconds=40.0, bpm=120.0, timeSignature="4/4"),
+            sections=[
+                SectionResult(
+                    id="intro",
+                    name="Intro",
+                    type="intro",
+                    startSeconds=0.0,
+                    endSeconds=0.3,
+                    measures=[
+                        Measure(
+                            bar=1,
+                            startSeconds=0.0,
+                            endSeconds=0.3,
+                            chords=[
+                                ChordEvent(
+                                    symbol="N",
+                                    startSeconds=0.0,
+                                    endSeconds=0.3,
+                                    source="ai",
+                                )
+                            ],
+                        )
+                    ],
+                ),
+                SectionResult(
+                    id="oversized",
+                    name="Oversized",
+                    type="chorus",
+                    startSeconds=0.3,
+                    endSeconds=40.0,
+                    measures=[
+                        Measure(
+                            bar=1,
+                            startSeconds=0.3,
+                            endSeconds=40.0,
+                            chords=[
+                                ChordEvent(
+                                    symbol="C",
+                                    startSeconds=0.3,
+                                    endSeconds=40.0,
+                                    source="ai",
+                                )
+                            ],
+                        )
+                    ],
+                ),
+            ],
+            sourceType="youtube",
+            sourceLabel="test",
+            analysisMethod="ai_only",
+            tempoSegments=[
+                TempoSegment(
+                    startSeconds=0.0,
+                    endSeconds=40.0,
+                    bpm=120.0,
+                    confidence=0.9,
+                )
+            ],
+            downbeatOffsetSeconds=0.0,
+        )
+        errors = validate_quality(result)
+        self.assertTrue(any(item.startswith("oversized_section:oversized") for item in errors))
+        self.assertTrue(any(item.startswith("section_boundary_off_beat:oversized") for item in errors))
 
     def test_roman(self) -> None:
         self.assertEqual(roman_numeral("G", "C", "major"), "V")
