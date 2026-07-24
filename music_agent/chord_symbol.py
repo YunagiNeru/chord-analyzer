@@ -219,6 +219,11 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
     elif chord.quality == "power":
         suffix = "5"
 
+    # A simplified symbol represents only the root and basic chord quality.
+    # Seventh, extensions, alterations and slash bass are intentionally omitted.
+    if simplify:
+        return f"{chord.root}{suffix}"
+
     altered_ninth = any(token in {"b9", "#9"} for token in chord.alterations)
     extension_degree = next(
         (
@@ -231,12 +236,12 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
 
     if chord.quality == "diminished" and chord.seventh == "minor7":
         suffix = "m7-5"
-    elif not simplify and extension_degree and chord.seventh == "major7":
+    elif extension_degree and chord.seventh == "major7":
         if chord.quality == "minor":
             suffix = f"mMaj{extension_degree}"
         else:
             suffix = f"maj{extension_degree}"
-    elif not simplify and extension_degree and chord.seventh == "minor7":
+    elif extension_degree and chord.seventh == "minor7":
         if chord.quality == "minor":
             suffix = f"m{extension_degree}"
         elif chord.quality == "major":
@@ -250,17 +255,16 @@ def format_chord(chord: ParsedChord, *, simplify: bool = False) -> str:
     elif chord.seventh == "diminished7":
         suffix = "dim7"
 
-    if not simplify:
-        for extension in chord.extensions:
-            if extension == extension_degree or (extension == "9" and altered_ninth):
-                continue
-            if extension.startswith("add"):
-                suffix += extension
-            elif extension not in suffix:
-                suffix += extension
-        for alteration in chord.alterations:
-            if alteration not in suffix:
-                suffix += alteration
+    for extension in chord.extensions:
+        if extension == extension_degree or (extension == "9" and altered_ninth):
+            continue
+        if extension.startswith("add"):
+            suffix += extension
+        elif extension not in suffix:
+            suffix += extension
+    for alteration in chord.alterations:
+        if alteration not in suffix:
+            suffix += alteration
 
     bass_suffix = ""
     if chord.bass and chord.bass != chord.root:
