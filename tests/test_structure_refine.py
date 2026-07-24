@@ -86,25 +86,42 @@ class StructureRefineTests(unittest.TestCase):
             self.assertLess(distance, 0.002)
 
     def test_oversized_chorus_is_deterministically_split(self) -> None:
-        parent = SectionStructureDraft(
-            id="chorus1a",
-            name="サビ1a",
-            type="chorus",
-            startSeconds=50.0,
-            endSeconds=101.0,
-            key="F#",
-            mode="minor",
-            confidence=0.9,
-        )
+        sections = [
+            SectionStructureDraft(
+                id="intro1",
+                name="イントロ1",
+                type="intro",
+                startSeconds=0.0,
+                endSeconds=25.0,
+            ),
+            SectionStructureDraft(
+                id="intro2",
+                name="イントロ2",
+                type="intro",
+                startSeconds=25.0,
+                endSeconds=50.0,
+            ),
+            SectionStructureDraft(
+                id="chorus1a",
+                name="サビ1a",
+                type="chorus",
+                startSeconds=50.0,
+                endSeconds=101.0,
+                key="F#",
+                mode="minor",
+                confidence=0.9,
+            ),
+        ]
 
         refined, _ = refine_sections(
-            [parent],
+            sections,
             grid=self.grid,
             duration=101.0,
             model_refinements={"chorus1a": StructureRefinementDraft()},
         )
 
-        self.assertGreater(len(refined), 1)
+        chorus_children = [item for item in refined if item.id.startswith("chorus1a")]
+        self.assertGreater(len(chorus_children), 1)
         self.assertEqual(refined[0].startSeconds, 0.0)
         self.assertEqual(refined[-1].endSeconds, 101.0)
         self.assertTrue(
