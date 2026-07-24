@@ -118,7 +118,7 @@ class AccuracyPipelineV2:
         self.max_parallel_calls = max(1, min(8, max_parallel_calls))
         self.youtube_api_key = os.environ.get("YOUTUBE_API_KEY")
         self.enable_reference_research = os.environ.get("ENABLE_REFERENCE_RESEARCH", "1") == "1"
-        self.max_resolver_calls = max(0, int(os.environ.get("MAX_RESOLVER_CALLS", "4")))
+        self.max_resolver_calls = max(0, int(os.environ.get("MAX_RESOLVER_CALLS", "12")))
 
     def analyze_youtube(self, *, url: str) -> AnalysisResult:
         metadata = resolve_youtube_metadata(url, api_key=self.youtube_api_key)
