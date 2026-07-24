@@ -40,6 +40,14 @@ def _strict_quality_gate() -> bool:
     }
 
 
+def _max_degraded_unresolved_ratio() -> float:
+    try:
+        value = float(os.environ.get("MAX_DEGRADED_UNRESOLVED_RATIO", "0.40"))
+    except (TypeError, ValueError):
+        value = 0.40
+    return max(0.30, min(0.60, value))
+
+
 def _is_fatal_quality_error(error: str) -> bool:
     if error.startswith(_FATAL_QUALITY_PREFIXES):
         return True
@@ -78,7 +86,7 @@ def _append_degraded_warnings(result, errors: list[str]) -> None:
         "この結果は自動採譜の下書きです。低信頼区間は音源を再生して確認してください。"
     )
     limitations.append(
-        "本番モードでは、時間軸と既知コードの品質を満たす場合に限り、"
+        "本番モードでは、時間軸と既知コードの品質を満たし、未確定率が許容上限以内の場合に限り、"
         "resolverの一時障害が残っても未確定区間を明示して結果を返します。"
     )
     result.warnings = list(dict.fromkeys(warnings))
@@ -122,11 +130,17 @@ def _release_run(self, *args, **kwargs):
             "Accuracy v2 invariant violation: " + ", ".join(invariant_errors)
         )
 
+    strict = _strict_quality_gate()
     fatal_errors = (
         quality_errors
-        if _strict_quality_gate()
+        if strict
         else [error for error in quality_errors if _is_fatal_quality_error(error)]
     )
+    if not strict and _unresolved_ratio(result) > _max_degraded_unresolved_ratio():
+        fatal_errors.append(
+            f"excessive_unresolved_coverage:{_unresolved_ratio(result):.3f}"
+        )
+    fatal_errors = sorted(set(fatal_errors))
     if fatal_errors:
         raise RuntimeError(
             "Accuracy v2 quality gate violation: " + ", ".join(fatal_errors)
