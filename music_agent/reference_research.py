@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import Any
 
 from google.genai import types
 
@@ -59,10 +60,49 @@ def _extract_bpms(text: str) -> tuple[list[float], dict[float, int]]:
     return candidates[:8], support
 
 
+def _append_grounding_sources(
+    response: Any,
+    sources: list[ReferenceSource],
+) -> None:
+    candidate = response.candidates[0] if response.candidates else None
+    grounding = getattr(candidate, "grounding_metadata", None) if candidate else None
+    if not grounding:
+        return
+    for chunk in getattr(grounding, "grounding_chunks", None) or []:
+        web = getattr(chunk, "web", None)
+        url = getattr(web, "uri", None) if web else None
+        title = getattr(web, "title", None) if web else None
+        if url and not any(item.url == url for item in sources):
+            sources.append(
+                ReferenceSource(
+                    title=title or url,
+                    url=url,
+                    sourceType="google-search",
+                    facts=[],
+                )
+            )
+
+
+def _trusted_bpms(
+    raw_candidates: list[float],
+    support: dict[float, int],
+    source_count: int,
+) -> list[float]:
+    return [
+        value
+        for value in raw_candidates
+        if support.get(value, 0) >= 2
+        or (support.get(value, 0) >= 1 and source_count >= 2)
+    ]
+
+
 def research_references(
     gateway: ModelGateway,
     metadata: dict[str, object],
 ) -> ReferenceResearchResult:
+    sources: list[ReferenceSource] = []
+    texts: list[str] = []
+
     response = gateway.generate_text(
         contents=build_reference_prompt(metadata),
         system_instruction=REFERENCE_ANALYSIS_SYSTEM_PROMPT,
@@ -70,37 +110,43 @@ def research_references(
         max_output_tokens=2_048,
         tools=[types.Tool(google_search=types.GoogleSearch())],
     )
-    text = (response.text or "").strip()
-    sources: list[ReferenceSource] = []
-    candidate = response.candidates[0] if response.candidates else None
-    grounding = getattr(candidate, "grounding_metadata", None) if candidate else None
-    if grounding:
-        for chunk in getattr(grounding, "grounding_chunks", None) or []:
-            web = getattr(chunk, "web", None)
-            url = getattr(web, "uri", None) if web else None
-            title = getattr(web, "title", None) if web else None
-            if url and not any(item.url == url for item in sources):
-                sources.append(
-                    ReferenceSource(
-                        title=title or url,
-                        url=url,
-                        sourceType="google-search",
-                        facts=[],
-                    )
-                )
+    texts.append((response.text or "").strip())
+    _append_grounding_sources(response, sources)
 
-    raw_bpm_candidates, bpm_support = _extract_bpms(text)
-    # The pipeline treats returned values as grounded evidence. Do not expose a
-    # single unsupported mention as a candidate; it would be indistinguishable
-    # from hallucinated search prose downstream.
-    bpm_candidates = [
-        value
-        for value in raw_bpm_candidates
-        if bpm_support.get(value, 0) >= 2
-        or (bpm_support.get(value, 0) >= 1 and len(sources) >= 2)
-    ]
+    combined_text = "\n".join(texts)
+    raw_bpm_candidates, bpm_support = _extract_bpms(combined_text)
+    bpm_candidates = _trusted_bpms(
+        raw_bpm_candidates,
+        bpm_support,
+        len(sources),
+    )
+
+    if not bpm_candidates:
+        retry_prompt = (
+            build_reference_prompt(metadata)
+            + "\n前回は独立資料で裏付けられたBPMを抽出できませんでした。"
+            "対象はprovidedMetadataと完全一致する同一録音です。"
+            "BPMだけを最低2資料で検索し、資料ごとに `BPM=数値` と明記してください。"
+        )
+        retry_response = gateway.generate_text(
+            contents=retry_prompt,
+            system_instruction=REFERENCE_ANALYSIS_SYSTEM_PROMPT,
+            temperature=0.0,
+            max_output_tokens=1_536,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+        )
+        texts.append((retry_response.text or "").strip())
+        _append_grounding_sources(retry_response, sources)
+        combined_text = "\n".join(texts)
+        raw_bpm_candidates, bpm_support = _extract_bpms(combined_text)
+        bpm_candidates = _trusted_bpms(
+            raw_bpm_candidates,
+            bpm_support,
+            len(sources),
+        )
+
     key_candidates = list(
-        dict.fromkeys(match.strip() for match in KEY_RE.findall(text))
+        dict.fromkeys(match.strip() for match in KEY_RE.findall(combined_text))
     )[:8]
     facts: list[str] = []
     if raw_bpm_candidates:
@@ -117,7 +163,7 @@ def research_references(
         source.facts = list(facts)
 
     return ReferenceResearchResult(
-        summary=text,
+        summary=combined_text,
         sources=sources[:8],
         bpm_candidates=bpm_candidates,
         key_candidates=key_candidates,
