@@ -92,6 +92,55 @@ class BeatGridTests(unittest.TestCase):
         self.assertEqual(len(grid.tempo_segments), 1)
         self.assertEqual(grid.tempo_segments[0].bpm, 170.0)
 
+    def test_review_snapshot_uses_corroborated_120_not_ungrounded_240(self) -> None:
+        sections = [
+            SectionStructureDraft(
+                id=section_id,
+                name=section_id,
+                type=section_type,
+                startSeconds=start,
+                endSeconds=end,
+            )
+            for section_id, section_type, start, end in (
+                ("intro1", "intro", 0.0, 11.0),
+                ("intro2", "intro", 11.0, 27.0),
+                ("verse1", "verse", 27.0, 50.0),
+                ("prechorus1", "pre_chorus", 50.0, 61.0),
+                ("chorus1", "chorus", 61.0, 84.0),
+                ("interlude1", "interlude", 84.0, 95.0),
+                ("verse2", "verse", 95.0, 107.0),
+                ("prechorus2", "pre_chorus", 107.0, 129.0),
+                ("interlude2", "interlude", 129.0, 140.0),
+                ("bridge", "bridge", 140.0, 160.0),
+                ("chorus3", "chorus", 160.0, 181.0),
+                ("outro", "outro", 181.0, 190.0),
+            )
+        ]
+        rhythm = RhythmDraft(
+            durationSeconds=190.0,
+            selectedBpm=120.0,
+            bpmCandidates=[
+                TempoCandidate(bpm=120.0, confidence=0.95, interpretation="model"),
+                TempoCandidate(bpm=240.0, confidence=0.95, interpretation="double-time"),
+            ],
+            tempoSegments=[
+                TempoSegment(
+                    startSeconds=0.0,
+                    endSeconds=190.0,
+                    bpm=120.0,
+                    confidence=0.95,
+                )
+            ],
+            timeSignature="4/4",
+            confidence=0.95,
+        )
+
+        grid = build_beat_grid(rhythm=rhythm, sections=sections, duration=190.0)
+
+        self.assertEqual(grid.bpm, 120.0)
+        self.assertEqual(grid.tempo_segments[0].bpm, 120.0)
+        self.assertEqual(grid.bar_for_time(61.0), 31)
+
 
 if __name__ == "__main__":
     unittest.main()
