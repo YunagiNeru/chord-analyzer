@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -53,13 +54,22 @@ def _finite(value: object, default: float = 0.0) -> float:
     return number if math.isfinite(number) else default
 
 
+def _key_mode_label(key: str | None, mode: str | None) -> str | None:
+    if not key:
+        return None
+    return " ".join(value for value in (key, mode) if value)
+
+
 def _canonical_hint(value: str | None) -> tuple[int, str] | None:
     if not value:
         return None
     token = value.strip().replace("♯", "#").replace("♭", "b")
+    note_match = re.match(r"^\s*([A-Ga-g](?:#|b)?)", token)
+    if not note_match:
+        return None
+    note = note_match.group(1)[0].upper() + note_match.group(1)[1:]
     lower = token.lower()
     mode = "minor" if "minor" in lower or "マイナー" in token else "major"
-    note = token.split()[0].replace("major", "").replace("minor", "").strip()
     lookup = {
         "C": 0,
         "B#": 0,
@@ -95,7 +105,11 @@ def _event_weight(event: ChordEvent) -> float:
     duration = max(0.0, _finite(event.endSeconds) - _finite(event.startSeconds))
     confidence = max(0.15, min(1.0, _finite(event.confidence, 0.5)))
     agreement = event.agreement
-    agreement_weight = max(0.35, min(1.0, _finite(agreement, 0.6))) if agreement is not None else 0.6
+    agreement_weight = (
+        max(0.35, min(1.0, _finite(agreement, 0.6)))
+        if agreement is not None
+        else 0.6
+    )
     return duration * confidence * agreement_weight
 
 
@@ -219,29 +233,35 @@ def reconcile_result_harmony(
         for section in result.sections
         for event in section_events[section.id]
     ]
+    original_global_hint = _key_mode_label(
+        result.track.globalKey,
+        result.track.globalMode,
+    )
     global_estimate = estimate_key(
         all_events,
-        hints=[
-            result.track.globalKey,
-            *reference_hints,
-        ],
+        hints=[original_global_hint, *reference_hints],
     )
     result.track.globalKey = global_estimate.key
     result.track.globalMode = global_estimate.mode
 
+    global_identity = _canonical_hint(
+        f"{global_estimate.key} {global_estimate.mode}"
+    )
+    assert global_identity is not None
     for section in result.sections:
         events = section_events[section.id]
+        section_hint = _key_mode_label(section.key, section.mode)
         local = estimate_key(
             events,
-            hints=[section.key, result.track.globalKey, *reference_hints],
+            hints=[section_hint, original_global_hint, *reference_hints],
         )
         global_score = _score_candidate(
             events,
-            tonic=_canonical_hint(f"{global_estimate.key} {global_estimate.mode}")[0],
+            tonic=global_identity[0],
             mode=global_estimate.mode,
         )
         use_local = (
-            len(events) >= 2
+            len([event for event in events if parse_chord(event.symbol).root_pc is not None]) >= 2
             and local.score >= global_score + 0.10
             and local.margin >= 0.035
         )
@@ -258,7 +278,10 @@ def normalize_tempo_segments(result: AnalysisResult) -> None:
     bpm = result.track.bpm
     if not bpm or duration <= 0.0:
         return
-    segments = sorted(result.tempoSegments, key=lambda item: (item.startSeconds, item.endSeconds))
+    segments = sorted(
+        result.tempoSegments,
+        key=lambda item: (item.startSeconds, item.endSeconds),
+    )
     if not segments:
         result.tempoSegments = [
             TempoSegment(
