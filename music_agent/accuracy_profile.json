@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "roleWeights": {
     "root_quality": 1.25,
     "bass_extension": 0.92,
@@ -9,6 +9,9 @@
   "alternativeWeight": 0.16,
   "simpleTriadReinforcement": 0.22,
   "uncertaintyThreshold": 0.58,
+  "minimumPrimaryContributors": 2,
+  "exactAgreementWeight": 0.25,
+  "componentAgreementWeight": 0.75,
   "changePenalty": 0.28,
   "isolatedPenalty": 0.22,
   "repeatedSectionConfidenceThreshold": 0.58,
