@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "roleWeights": {
+    "root_quality": 1.25,
+    "bass_extension": 0.92,
+    "rhythm_pattern": 0.82
+  },
+  "dspWeight": 0.48,
+  "alternativeWeight": 0.16,
+  "simpleTriadReinforcement": 0.22,
+  "uncertaintyThreshold": 0.58,
+  "minimumPrimaryContributors": 2,
+  "exactAgreementWeight": 0.25,
+  "componentAgreementWeight": 0.75,
+  "changePenalty": 0.28,
+  "isolatedPenalty": 0.22,
+  "repeatedSectionConfidenceThreshold": 0.58,
+  "repeatedSectionWinnerThreshold": 0.68,
+  "gridIntegerBarWeight": 0.42,
+  "gridBeatAlignmentWeight": 0.34,
+  "gridSectionAlignmentWeight": 0.18,
+  "gridModelPriorWeight": 0.12
+}

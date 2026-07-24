@@ -1,0 +1,38 @@
+{
+  "track": {
+    "durationSeconds": 190.0,
+    "bpm": 170.0,
+    "timeSignature": "4/4",
+    "globalKey": "Ab",
+    "globalMode": "minor"
+  },
+  "tempoSegments": [
+    {
+      "startSeconds": 0.0,
+      "endSeconds": 188.0,
+      "bpm": 172.0,
+      "confidence": 0.95
+    }
+  ],
+  "resolverCollapseCase": {
+    "sectionId": "verse_1",
+    "startSeconds": 0.0,
+    "endSeconds": 8.0,
+    "symbols": ["D", "E", "C#m", "F#m", "D", "E", "C#m", "F#m"],
+    "candidates": ["Bmaj7", "D", "E", "C#m", "F#m"]
+  },
+  "keySections": [
+    {
+      "id": "front",
+      "key": "F#",
+      "mode": "minor",
+      "symbols": ["D", "E", "C#m", "F#m", "D", "E", "C#m", "F#m"]
+    },
+    {
+      "id": "back",
+      "key": "F#",
+      "mode": "minor",
+      "symbols": ["E", "F#", "D#m", "G#m", "E", "F#", "D#m", "G#m"]
+    }
+  ]
+}

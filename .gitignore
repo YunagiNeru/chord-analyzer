@@ -1,2 +1,5 @@
 *.zip
 *.log
+__pycache__/
+*.py[cod]
+accuracy-artifacts/

@@ -48,7 +48,7 @@ logger = logging.getLogger("chord-analyzer")
 
 app = FastAPI(
     title="Music Chord Analyzer",
-    version="1.0.0",
+    version="2.0.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -96,7 +96,13 @@ async def index() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok", "service": "music-chord-analyzer"}
+    return {
+        "status": "ok",
+        "service": "music-chord-analyzer",
+        "version": app.version,
+        "pipeline": os.environ.get("ANALYSIS_PIPELINE", "v2"),
+        "release": os.environ.get("APP_RELEASE_SHA", "development"),
+    }
 
 
 @app.post("/api/analyze", response_model=AnalysisResult)
@@ -142,8 +148,9 @@ async def analyze(
             detail={
                 "code": "analysis_failed",
                 "message": (
-                    "解析に失敗しました。YouTube動画が非公開・年齢制限付きの場合や、"
-                    "Vertex AIの権限・クォータが不足している場合があります。"
+                    "解析に失敗しました。音源へのアクセス、Vertex AIの一時障害、"
+                    "または品質基準を満たさない解析結果が原因の可能性があります。"
+                    "時間を置いて再実行するか、別の音源を指定してください。"
                 ),
                 "errorType": type(exc).__name__,
             },
@@ -558,4 +565,3 @@ async def _download_public_audio(url: str, destination: Path) -> str:
             "message": "音声URLを取得できませんでした。",
         },
     )
-

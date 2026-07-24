@@ -1,3 +1,16 @@
 from .agents import MusicCoordinatorAgent
+from .accuracy_v2_finalization_v2 import install_accuracy_v2_finalization
+from .accuracy_v2_release_mode import install_accuracy_v2_release_mode
+from .accuracy_v2_release_recovery import install_accuracy_v2_release_recovery
+from .accuracy_v2_resolver_gate import install_accuracy_v2_resolver_gate
+from .accuracy_v2_resolver_recovery import install_accuracy_v2_resolver_recovery
+from .quality_extension import install_quality_extension
+
+install_quality_extension()
+install_accuracy_v2_release_recovery()
+install_accuracy_v2_finalization()
+install_accuracy_v2_resolver_recovery()
+install_accuracy_v2_resolver_gate()
+install_accuracy_v2_release_mode()
 
 __all__ = ["MusicCoordinatorAgent"]
